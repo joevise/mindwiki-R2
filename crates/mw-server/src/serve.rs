@@ -326,7 +326,7 @@ async fn ingest_handler(
 
     let agent = mw_agent::WikiAgent::new(&s.skills_root, &work);
     let prompt = format!(
-        "使用 wiki-ingest 技能，将上传的文件 {rel}（原始文件名 {filename}）入库到知识库。work_dir 即知识库根目录。完成后简述入库结果。"
+        "将上传文件 {rel}（原始文件名 {filename}）入库到知识库，work_dir 即知识库根目录。规则：先检查根目录是否有 index.md——若无（全新知识库），先用 wiki-init 技能初始化 Wiki，然后用 wiki-ingest 技能入库该文件；若已有则直接 wiki-ingest。不要向用户提问确认，直接执行到底。完成后简述初始化与入库结果（建了哪些页面/类型）。"
     );
     let answer = match agent.ask(&prompt).await {
         Ok(a) => a,
