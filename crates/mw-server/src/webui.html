@@ -108,6 +108,18 @@
   #ingest-progress div.err { color: #d92027; }
   #ingest-progress div.err::before { content: "✕ "; }
 
+  /* Wiki 压缩包导入 */
+  .import-sep { border: none; border-top: 1px dashed #ddd; margin: 14px 0; }
+  .spinner {
+    display: inline-block; width: 12px; height: 12px; margin-right: 6px;
+    border: 2px solid #ddd; border-top-color: #d92027; border-radius: 50%;
+    animation: spin 0.8s linear infinite; vertical-align: -2px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #import-skipped { font-size: 12px; color: #999; margin-top: 8px; }
+  #import-skipped summary { cursor: pointer; color: #555; }
+  #import-skipped details div { padding-left: 12px; line-height: 1.6; }
+
   /* 文件树 / 图谱 */
   .tabs { display: flex; gap: 0; border-bottom: 2px solid #111; }
   .tabs button {
@@ -186,6 +198,12 @@
           <div class="msg" id="ingest-msg"></div>
           <div id="ingest-progress"></div>
           <div class="files" id="ingest-files"></div>
+          <hr class="import-sep">
+          <h2>📦 导入 Wiki 压缩包</h2>
+          <input type="file" id="import-file" accept=".zip">
+          <button id="btn-import" onclick="doImport()">导入</button>
+          <div class="msg" id="import-msg"></div>
+          <div id="import-skipped"></div>
         </div>
 
         <div class="card">
@@ -286,6 +304,8 @@ function onLocked() {
   $("chat-list").innerHTML = "";
   $("ingest-progress").innerHTML = "";
   $("ingest-files").innerHTML = "";
+  $("import-msg").innerHTML = "";
+  $("import-skipped").innerHTML = "";
   closePreview();
   G.nodes = []; G.edges = []; G.raw = null; graphDirty = true;
   cancelAnimationFrame(G.raf);
@@ -522,6 +542,47 @@ async function doIngest() {
     $("btn-ingest").disabled = false;
     $("ingest-file").value = "";
     loadTree(); graphDirty = true;
+  }
+}
+
+/* ============ Wiki 压缩包导入 ============ */
+async function doImport() {
+  const file = $("import-file").files[0];
+  if (!file) return showMsg("import-msg", "请选择 .zip 文件", true);
+  const fd = new FormData();
+  fd.append("file", file);
+  $("btn-import").disabled = true;
+  $("import-skipped").innerHTML = "";
+  $("import-msg").innerHTML = '<span class="spinner"></span>导入中…';
+  $("import-msg").className = "msg";
+  try {
+    const resp = await fetch("/api/wiki/import", {method: "POST", body: fd});
+    const body = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      showMsg("import-msg", friendly(resp.status, body), true);
+      return;
+    }
+    const imported = (body.imported || []).length;
+    const skipped = body.skipped || [];
+    showMsg("import-msg", `导入完成：${imported} 个文件，文件树/图谱已更新`, false);
+    if (skipped.length) {
+      const det = document.createElement("details");
+      const sum = document.createElement("summary");
+      sum.textContent = `跳过 ${skipped.length} 项（.git/.obsidian 等）`;
+      det.appendChild(sum);
+      for (const s of skipped) {
+        const d = document.createElement("div");
+        d.textContent = s;
+        det.appendChild(d);
+      }
+      $("import-skipped").appendChild(det);
+    }
+    loadTree(); graphDirty = true; loadGraph();
+  } catch (e) {
+    showMsg("import-msg", "网络错误：" + e, true);
+  } finally {
+    $("btn-import").disabled = false;
+    $("import-file").value = "";
   }
 }
 

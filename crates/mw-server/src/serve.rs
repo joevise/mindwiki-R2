@@ -7,6 +7,7 @@
 //! POST /api/vault/init       {password}      → 创建 vault（已存在 409）
 //! GET  /api/vault/status                     → {exists, size, state: sealed|open}
 //! POST /api/ingest           multipart .md   → 复用解密会话 + Agent 入库 + 即时封印
+//! POST /api/wiki/import      multipart .zip  → 现成 Wiki 整包导入（结构保留，不调 LLM）
 //! POST /api/query            {question}      → 复用解密会话 + Agent 查询（有变更才封印）
 //! GET  /api/wiki/tree                        → 文件树 JSON（排除 .git）
 //! GET  /api/wiki/page?path=                  → {path, content}（防路径穿越）
@@ -19,7 +20,7 @@
 
 use anyhow::{bail, Context, Result};
 use axum::{
-    extract::{Multipart, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Query, State},
     http::StatusCode,
     response::{sse::Event as SseEvent, Html, IntoResponse, Response, Sse},
     routing::{get, post},
@@ -97,6 +98,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/vault/init", post(init_handler))
         .route("/api/vault/status", get(vault_status_handler))
         .route("/api/ingest", post(ingest_handler))
+        .route(
+            "/api/wiki/import",
+            post(import_handler).layer(DefaultBodyLimit::max(MAX_IMPORT_BYTES)),
+        )
         .route("/api/query", post(query_handler))
         .route("/api/wiki/tree", get(tree_handler))
         .route("/api/wiki/page", get(page_handler))
@@ -385,6 +390,163 @@ fn ingest_prompt(rel: &str, filename: &str) -> String {
     format!(
         "将上传文件 {rel}（原始文件名 {filename}）入库到知识库，work_dir 即知识库根目录。规则：先检查根目录是否有 index.md——若无（全新知识库），先用 wiki-init 技能初始化 Wiki，然后用 wiki-ingest 技能入库该文件；若已有则直接 wiki-ingest。不要向用户提问确认，直接执行到底。完成后简述初始化与入库结果（建了哪些页面/类型）。"
     )
+}
+
+/// Wiki 压缩包上传上限（50MB）
+const MAX_IMPORT_BYTES: usize = 50 * 1024 * 1024;
+
+/// 垃圾路径：.git/ .obsidian/ .trash/ __MACOSX/ 目录与 .DS_Store / Thumbs.db 文件
+fn is_import_junk(rel: &Path) -> bool {
+    rel.components().any(|c| {
+        matches!(c, std::path::Component::Normal(n)
+            if matches!(n.to_str(), Some(".git" | ".obsidian" | ".trash" | "__MACOSX" | ".DS_Store" | "Thumbs.db")))
+    })
+}
+
+/// POST /api/wiki/import：现成 Wiki 整包导入（结构保留、不萃取、不调 LLM）。
+/// multipart 字段 file = 一个 .zip（≤50MB）；同名覆盖；git commit 后 seal + 重建长驻会话。
+async fn import_handler(
+    State(s): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let gw = gateway(&s);
+    if let Err(r) = check_gate(&gw) {
+        return r;
+    }
+    let mut data: Option<Vec<u8>> = None;
+    loop {
+        match multipart.next_field().await {
+            Ok(Some(field)) => {
+                if field.file_name().is_some_and(|n| n.ends_with(".zip")) {
+                    match field.bytes().await {
+                        Ok(b) => {
+                            if b.len() > MAX_IMPORT_BYTES {
+                                return err(
+                                    StatusCode::PAYLOAD_TOO_LARGE,
+                                    "压缩包超过 50MB 上限",
+                                );
+                            }
+                            data = Some(b.to_vec());
+                        }
+                        Err(e) => return err(e.status(), e.body_text()),
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return err(e.status(), e.body_text()),
+        }
+    }
+    let bytes = match data {
+        Some(b) => b,
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "请上传 .zip 文件（multipart 字段带 filename）",
+            )
+        }
+    };
+
+    let _lock = s.vault_lock.lock().await;
+    let mut slot = s.current_session.write().await;
+    if slot.is_none() {
+        return err(
+            StatusCode::LOCKED,
+            "知识库已锁定：请先解锁（POST /api/gateway/open）",
+        );
+    }
+    let session = slot.as_ref().unwrap();
+    let work = session.work_dir().to_path_buf();
+
+    let mut archive = match zip::ZipArchive::new(std::io::Cursor::new(bytes)) {
+        Ok(a) => a,
+        Err(e) => return err(StatusCode::BAD_REQUEST, format!("zip 解析失败：{e}")),
+    };
+    let mut imported: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(e) => return err(StatusCode::BAD_REQUEST, format!("zip 读取失败：{e}")),
+        };
+        let name = entry.name().replace('\\', "/");
+        let rel = Path::new(&name);
+        // sanitize：拒绝 .. / 绝对路径 / 符号链接 entry
+        if rel.is_absolute()
+            || rel.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return err(
+                StatusCode::BAD_REQUEST,
+                format!("压缩包包含恶意路径：{name}"),
+            );
+        }
+        if entry.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
+            return err(
+                StatusCode::BAD_REQUEST,
+                format!("压缩包包含符号链接：{name}"),
+            );
+        }
+        if is_import_junk(rel) {
+            skipped.push(name);
+            continue;
+        }
+        let dst = work.join(rel);
+        if entry.is_dir() {
+            if let Err(e) = std::fs::create_dir_all(&dst) {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+            }
+            continue;
+        }
+        if let Some(p) = dst.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
+        let mut buf = Vec::new();
+        if let Err(e) = std::io::Read::read_to_end(&mut entry, &mut buf) {
+            return err(StatusCode::BAD_REQUEST, format!("zip 解压失败：{e}"));
+        }
+        // 同名覆盖：导入是显式用户动作
+        if let Err(e) = std::fs::write(&dst, &buf) {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+        imported.push(name);
+    }
+
+    if let Err(e) = session.git_commit(&format!("Import wiki bundle: {} files", imported.len())) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("git 提交失败：{e}"));
+    }
+    if let Err(e) = s.vault.seal_session(&gw, session) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("封印失败：{e}"));
+    }
+    // seal 后重建长驻会话（旧会话销毁，open_session 新建放回 AppState）
+    *slot = None;
+    match s.vault.open_session(&gw) {
+        Ok(new_session) => *slot = Some(new_session),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("会话重建失败：{e}"),
+            )
+        }
+    }
+    drop(slot);
+    // 聊天会话绑定了旧 work_dir，作废待下轮懒建
+    *s.chat.lock().await = None;
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "imported": imported,
+            "skipped": skipped,
+            "committed": true,
+        })),
+    )
+        .into_response()
 }
 
 async fn query_handler(
@@ -1669,6 +1831,189 @@ mod tests {
             .send()
             .await
             .unwrap();
+        assert_eq!(resp.status(), StatusCode::LOCKED);
+    }
+
+    /// 内存构造 zip（zip::ZipWriter）
+    fn make_zip(files: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default();
+        for (name, content) in files {
+            w.start_file(*name, opts).unwrap();
+            w.write_all(content.as_bytes()).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    /// multipart 手工构造 zip 上传体
+    fn zip_multipart(boundary: &str, zip: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"wiki.zip\"\r\nContent-Type: application/zip\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(zip);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        body
+    }
+
+    async fn post_zip(client: &reqwest::Client, base: &str, zip: &[u8]) -> reqwest::Response {
+        let boundary = "MWZIPBOUNDARY";
+        client
+            .post(format!("{base}/api/wiki/import"))
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(zip_multipart(boundary, zip))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn import_zip_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, base, client) = spawn_unlocked_with_fake_llm(&tmp).await;
+
+        let zip = make_zip(&[
+            ("wiki/A.md", "# A\n\n链接到 [[B]]\n"),
+            ("wiki/B.md", "# B\n"),
+            ("sources/x.md", "# X\n"),
+            (".git/junk", "junk"),
+            (".obsidian/config", "{}"),
+        ]);
+        let resp = post_zip(&client, &base, &zip).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["committed"], true);
+        let imported: Vec<String> = body["imported"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(imported.len(), 3);
+        assert!(imported.contains(&"wiki/A.md".to_string()));
+        assert!(imported.contains(&"sources/x.md".to_string()));
+        let skipped: Vec<String> = body["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(skipped.contains(&".git/junk".to_string()));
+        assert!(skipped.contains(&".obsidian/config".to_string()));
+
+        // 文件树含 A.md / x.md，不含 .git / .obsidian
+        let tree: serde_json::Value = client
+            .get(format!("{base}/api/wiki/tree"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let s = tree.to_string();
+        assert!(s.contains("A.md"));
+        assert!(s.contains("x.md"));
+        assert!(!s.contains(".git"));
+        assert!(!s.contains(".obsidian"));
+
+        // 图谱有 A→B 边
+        let graph: serde_json::Value = client
+            .get(format!("{base}/api/wiki/graph"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let edges: Vec<(String, String)> = graph["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["from"].as_str().unwrap().to_string(),
+                    e["to"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert!(edges.contains(&("wiki/A.md".into(), "wiki/B.md".into())));
+
+        // git 历史含导入提交
+        {
+            let guard = state.current_session.read().await;
+            let log = guard.as_ref().unwrap().git_log().unwrap();
+            assert!(
+                log.iter().any(|m| m.contains("Import wiki bundle: 3 files")),
+                "git log: {log:?}"
+            );
+        }
+
+        // 锁定后重开：数据还在
+        let token = state.admin_token.read().unwrap().clone();
+        let resp = client
+            .post(format!("{base}/api/gateway/close"))
+            .json(&serde_json::json!({"admin_token": token}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = client
+            .post(format!("{base}/api/gateway/open"))
+            .json(&serde_json::json!({"password": "pw-A"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let tree: serde_json::Value = client
+            .get(format!("{base}/api/wiki/tree"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let s = tree.to_string();
+        assert!(s.contains("A.md"));
+        assert!(s.contains("x.md"));
+    }
+
+    #[tokio::test]
+    async fn import_rejects_path_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, base, client) = spawn_unlocked_with_fake_llm(&tmp).await;
+
+        let zip = make_zip(&[("wiki/ok.md", "# ok\n"), ("../../etc/evil", "evil")]);
+        let resp = post_zip(&client, &base, &zip).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["error"].as_str().unwrap().contains("etc/evil"));
+
+        // 拒绝后 work_dir 不应出现穿越产物
+        let guard = state.current_session.read().await;
+        let work = guard.as_ref().unwrap().work_dir();
+        assert!(!work.join("etc").exists());
+    }
+
+    #[tokio::test]
+    async fn import_requires_unlock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).unwrap();
+        let gw = KeyGateway::new().unwrap();
+        vault.init(&gw, "pw-A").unwrap();
+        gw.close();
+        let state = load_state(vault, tmp.path().to_path_buf()).unwrap();
+        let base = spawn_server(state).await;
+        let client = reqwest::Client::new();
+
+        let zip = make_zip(&[("wiki/A.md", "# A\n")]);
+        let resp = post_zip(&client, &base, &zip).await;
         assert_eq!(resp.status(), StatusCode::LOCKED);
     }
 }
