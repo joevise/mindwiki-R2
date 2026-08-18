@@ -17,13 +17,14 @@
 //! POST /api/ingest/stream    multipart .md   → SSE：tool_call/message/done 实时入库进度
 //! POST /api/chat             {message}       → SSE：多轮聊天（message/done）
 //! POST /api/chat/reset                       → 清空聊天会话
+//! DELETE /api/wiki/entry     {path, mode}    → 删除文件/目录（quick 直接删；smart 先删再 Agent 清理引用）
 
 use anyhow::{bail, Context, Result};
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Query, State},
     http::StatusCode,
     response::{sse::Event as SseEvent, Html, IntoResponse, Response, Sse},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use mw_crypto::{GatewayState, KeyGateway};
@@ -113,6 +114,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/ingest/stream", post(ingest_stream_handler))
         .route("/api/chat", post(chat_handler))
         .route("/api/chat/reset", post(chat_reset_handler))
+        .route("/api/wiki/entry", delete(delete_entry_handler))
         .with_state(state)
 }
 
@@ -547,6 +549,216 @@ async fn import_handler(
         })),
     )
         .into_response()
+}
+
+/* ============ 删除（快速 + 智能） ============ */
+
+#[derive(Deserialize)]
+struct DeleteRequest {
+    path: String,
+    mode: String,
+}
+
+/// 保护名单：检索/协议/日志核心文件不可删
+const PROTECTED_PATHS: [&str; 3] = ["index.md", "schema.md", "log.md"];
+
+/// 递归统计目标包含的文件数（文件→1，目录→整树文件数）
+fn count_files(p: &Path) -> usize {
+    if p.is_file() {
+        return 1;
+    }
+    let mut n = 0;
+    let mut stack = vec![p.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&d) {
+            for entry in entries.flatten() {
+                match entry.file_type() {
+                    Ok(t) if t.is_dir() => stack.push(entry.path()),
+                    Ok(t) if t.is_file() => n += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    n
+}
+
+/// LLM 是否可用（惰性从 appconfig.json / 环境变量补水），不可用时不报错、由调用方降级
+fn llm_ready(s: &Arc<AppState>) -> bool {
+    if !s.llm.read().unwrap().api_key.is_empty() {
+        return true;
+    }
+    let fresh = mw_agent::LlmConfig::load_or_env(&s.config_path);
+    if !fresh.api_key.is_empty() {
+        *s.llm.write().unwrap() = fresh;
+        return true;
+    }
+    false
+}
+
+/// 智能删除后清理 prompt（agent 只做引用清理，不重新萃取）
+fn delete_cleanup_prompt(path: &str) -> String {
+    let stem = Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string());
+    format!(
+        "文件 {path} 已从知识库删除，work_dir 即知识库根目录。请扫描全库（grep 搜索 [[{stem}]] 引用），清理所有悬空链接（直接移除该 wikilink 或标注\"已删除\"），更新 index.md 检索路由（如有该页条目），如 log.md 需要追加删除记录则追加。完成后简述清理了哪些文件。不要向用户提问。"
+    )
+}
+
+/// DELETE /api/wiki/entry {path, mode:quick|smart}
+/// 共同逻辑：路径 sanitize（canonicalize 前缀校验）+ 保护名单 + 闸门 + vault_lock。
+/// quick：删文件/目录 + git commit + seal + 重建会话。
+/// smart：先删再 WikiAgent 清理引用（无 LLM 配置降级 quick，响应带 degraded:true）。
+async fn delete_entry_handler(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<DeleteRequest>,
+) -> Response {
+    let gw = gateway(&s);
+    if let Err(r) = check_gate(&gw) {
+        return r;
+    }
+    let rel = req.path.replace('\\', "/");
+    let rel_path = Path::new(&rel);
+    if rel.trim().is_empty()
+        || rel_path.is_absolute()
+        || rel_path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::RootDir
+            )
+        })
+    {
+        return err(StatusCode::BAD_REQUEST, "非法路径：越出知识库目录");
+    }
+    if PROTECTED_PATHS.contains(&rel.as_str()) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            format!("{rel} 是知识库核心文件（index/schema/log），不可删除"),
+        );
+    }
+    if req.mode != "quick" && req.mode != "smart" {
+        return err(StatusCode::BAD_REQUEST, "mode 仅支持 quick 或 smart");
+    }
+
+    let _lock = s.vault_lock.lock().await;
+    let mut slot = s.current_session.write().await;
+    if slot.is_none() {
+        return err(
+            StatusCode::LOCKED,
+            "知识库已锁定：请先解锁（POST /api/gateway/open）",
+        );
+    }
+    let session = slot.as_ref().unwrap();
+    let work = session.work_dir().to_path_buf();
+
+    let canon_root = match work.canonicalize() {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let target = match canon_root.join(rel_path).canonicalize() {
+        Ok(t) => t,
+        Err(_) => return err(StatusCode::NOT_FOUND, "目标不存在"),
+    };
+    if !target.starts_with(&canon_root) {
+        return err(StatusCode::BAD_REQUEST, "非法路径：越出知识库目录");
+    }
+
+    let files_removed = count_files(&target);
+    let rm = if target.is_dir() {
+        std::fs::remove_dir_all(&target)
+    } else {
+        std::fs::remove_file(&target)
+    };
+    if let Err(e) = rm {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("删除失败：{e}"));
+    }
+    if let Err(e) = session.git_commit(&format!("Delete: {rel}")) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("git 提交失败：{e}"));
+    }
+
+    // smart 且无 LLM 配置 → 降级 quick
+    let want_smart = req.mode == "smart";
+    let degraded = want_smart && !llm_ready(&s);
+
+    let mut answer: Option<String> = None;
+    let mut files_touched: Vec<String> = Vec::new();
+    if want_smart && !degraded {
+        let before = snapshot(&work);
+        let agent = mw_agent::WikiAgent::with_llm(
+            &s.skills_root,
+            &work,
+            s.llm.read().unwrap().clone(),
+        );
+        match agent.ask(&delete_cleanup_prompt(&rel)).await {
+            Ok(a) => {
+                let after = snapshot(&work);
+                files_touched = diff_snapshots(&before, &after);
+                if !files_touched.is_empty() {
+                    if let Err(e) =
+                        session.git_commit(&format!("Cleanup references after delete: {rel}"))
+                    {
+                        return err(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("git 提交失败：{e}"),
+                        );
+                    }
+                }
+                answer = Some(a);
+            }
+            Err(e) => {
+                // 删除已生效：先 seal 重建保持一致，再报错
+                if let Err(se) = s.vault.seal_session(&gw, session) {
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("封印失败：{se}"),
+                    );
+                }
+                *slot = None;
+                if let Ok(new_session) = s.vault.open_session(&gw) {
+                    *slot = Some(new_session);
+                }
+                drop(slot);
+                *s.chat.lock().await = None;
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("文件已删除，但 Agent 引用清理失败：{e}"),
+                );
+            }
+        }
+    }
+
+    // seal + 重建长驻会话（同 import：旧会话销毁，open_session 新建放回 AppState）
+    if let Err(e) = s.vault.seal_session(&gw, session) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("封印失败：{e}"));
+    }
+    *slot = None;
+    match s.vault.open_session(&gw) {
+        Ok(new_session) => *slot = Some(new_session),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("会话重建失败：{e}"),
+            )
+        }
+    }
+    drop(slot);
+    // 聊天会话绑定了旧 work_dir，作废待下轮懒建
+    *s.chat.lock().await = None;
+
+    let mut body = serde_json::json!({
+        "deleted": true,
+        "files_removed": files_removed,
+    });
+    if degraded {
+        body["degraded"] = serde_json::json!(true);
+    }
+    if let Some(a) = answer {
+        body["answer"] = serde_json::json!(a);
+        body["files_touched"] = serde_json::json!(files_touched);
+    }
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 async fn query_handler(
@@ -2015,5 +2227,193 @@ mod tests {
         let zip = make_zip(&[("wiki/A.md", "# A\n")]);
         let resp = post_zip(&client, &base, &zip).await;
         assert_eq!(resp.status(), StatusCode::LOCKED);
+    }
+
+    /* ============ Step 8：删除功能 ============ */
+
+    async fn delete_entry(
+        client: &reqwest::Client,
+        base: &str,
+        path: &str,
+        mode: &str,
+    ) -> reqwest::Response {
+        client
+            .delete(format!("{base}/api/wiki/entry"))
+            .json(&serde_json::json!({"path": path, "mode": mode}))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// 在当前会话 work_dir 写文件并提交
+    async fn seed_files(state: &Arc<AppState>, files: &[(&str, &str)]) {
+        let guard = state.current_session.read().await;
+        let session = guard.as_ref().unwrap();
+        let work = session.work_dir().to_path_buf();
+        for (rel, content) in files {
+            write_file(&work, rel, content);
+        }
+        session.git_commit("seed").unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_quick_removes_and_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, base, client) = spawn_unlocked_with_fake_llm(&tmp).await;
+        seed_files(
+            &state,
+            &[
+                ("index.md", "# 索引 [[A]]"),
+                ("wiki/A.md", "# A\n\n链接 [[B]]\n"),
+                ("wiki/B.md", "# B\n"),
+            ],
+        )
+        .await;
+
+        let resp = delete_entry(&client, &base, "wiki/A.md", "quick").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["deleted"], true);
+        assert_eq!(body["files_removed"], 1);
+        assert!(body.get("degraded").is_none());
+
+        // 文件树无此文件，B 还在
+        let tree: serde_json::Value = client
+            .get(format!("{base}/api/wiki/tree"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let s = tree.to_string();
+        assert!(!s.contains("A.md"), "tree: {s}");
+        assert!(s.contains("B.md"));
+
+        // git log 有 Delete 提交
+        {
+            let guard = state.current_session.read().await;
+            let log = guard.as_ref().unwrap().git_log().unwrap();
+            assert!(
+                log.iter().any(|m| m.contains("Delete: wiki/A.md")),
+                "git log: {log:?}"
+            );
+        }
+
+        // 锁定重开：数据还是删了
+        let token = state.admin_token.read().unwrap().clone();
+        let resp = client
+            .post(format!("{base}/api/gateway/close"))
+            .json(&serde_json::json!({"admin_token": token}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = client
+            .post(format!("{base}/api/gateway/open"))
+            .json(&serde_json::json!({"password": "pw-A"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let tree: serde_json::Value = client
+            .get(format!("{base}/api/wiki/tree"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let s = tree.to_string();
+        assert!(!s.contains("A.md"), "tree after reopen: {s}");
+        assert!(s.contains("B.md"));
+    }
+
+    #[tokio::test]
+    async fn delete_protected_paths_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_state, base, client) = spawn_unlocked_with_fake_llm(&tmp).await;
+        for path in ["index.md", "schema.md", "log.md"] {
+            let resp = delete_entry(&client, &base, path, "quick").await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{path}");
+            let body: serde_json::Value = resp.json().await.unwrap();
+            assert!(body["error"].as_str().unwrap().contains("不可删除"));
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_requires_unlock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).unwrap();
+        let gw = KeyGateway::new().unwrap();
+        vault.init(&gw, "pw-A").unwrap();
+        gw.close();
+        let state = load_state(vault, tmp.path().to_path_buf()).unwrap();
+        let base = spawn_server(state).await;
+        let client = reqwest::Client::new();
+
+        let resp = delete_entry(&client, &base, "wiki/A.md", "quick").await;
+        assert_eq!(resp.status(), StatusCode::LOCKED);
+    }
+
+    #[tokio::test]
+    async fn delete_smart_degrades_without_llm() {
+        std::env::remove_var("MW_LLM_API_KEY");
+        let tmp = tempfile::tempdir().unwrap();
+        // 不写 appconfig.json：无 LLM 配置
+        let vault = Vault::open(tmp.path()).unwrap();
+        let gw = KeyGateway::new().unwrap();
+        vault.init(&gw, "pw-A").unwrap();
+        gw.close();
+        let state = load_state(vault, tmp.path().to_path_buf()).unwrap();
+        let base = spawn_server(state.clone()).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{base}/api/gateway/open"))
+            .json(&serde_json::json!({"password": "pw-A"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        seed_files(
+            &state,
+            &[("index.md", "# 索引"), ("wiki/A.md", "# A\n")],
+        )
+        .await;
+
+        let resp = delete_entry(&client, &base, "wiki/A.md", "smart").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["deleted"], true);
+        assert_eq!(body["files_removed"], 1);
+        assert_eq!(body["degraded"], true);
+        assert!(body.get("answer").is_none());
+
+        // 确实删掉了
+        let tree: serde_json::Value = client
+            .get(format!("{base}/api/wiki/tree"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(!tree.to_string().contains("A.md"));
+    }
+
+    #[tokio::test]
+    async fn delete_path_traversal_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, base, client) = spawn_unlocked_with_fake_llm(&tmp).await;
+        seed_files(&state, &[("wiki/A.md", "# A\n")]).await;
+
+        for path in ["../etc/passwd", "../../etc/passwd", "/etc/passwd"] {
+            let resp = delete_entry(&client, &base, path, "quick").await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
+        // work_dir 未被破坏
+        let guard = state.current_session.read().await;
+        let work = guard.as_ref().unwrap().work_dir();
+        assert!(work.join("wiki/A.md").exists());
     }
 }

@@ -141,7 +141,46 @@
   .tree .file > .row { cursor: pointer; }
   .tree .file > .row::before { content: "· "; color: #999; }
   .tree .row:hover { color: #d92027; }
+  .tree .row { position: relative; }
+  .tree .row .del {
+    display: none; float: right; padding: 0 4px; color: #999;
+    font-size: 12px; cursor: pointer;
+  }
+  .tree .row:hover .del { display: inline; }
+  .tree .row .del:hover { color: #d92027; }
   #graph-canvas { display: block; cursor: grab; }
+
+  /* 删除确认弹层 / 智能删除遮罩 / toast */
+  .modal-mask {
+    position: fixed; inset: 0; background: rgba(0,0,0,.35);
+    display: flex; align-items: center; justify-content: center; z-index: 30;
+  }
+  .modal-box {
+    background: #fff; width: min(520px, 92vw); border-top: 4px solid #d92027;
+    padding: 22px 28px; font-size: 14px; line-height: 1.8;
+  }
+  .modal-title { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+  .modal-title span { color: #d92027; word-break: break-all; }
+  .modal-desc { font-size: 13px; color: #555; margin-bottom: 14px; }
+  .modal-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .modal-actions button.danger { background: #d92027; }
+  .modal-actions button.danger:hover { background: #a8151b; }
+  .modal-hint { font-size: 12px; color: #999; margin-top: 10px; }
+  #del-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 40;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .del-spin-box {
+    background: #fff; border-top: 4px solid #d92027; padding: 24px 36px;
+    font-size: 15px;
+  }
+  .del-spin-box .spinner { width: 16px; height: 16px; }
+  #toast {
+    position: fixed; right: 24px; bottom: 24px; z-index: 50;
+    background: #111; color: #fff; padding: 12px 20px; font-size: 13px;
+    max-width: 60vw; border-left: 4px solid #d92027;
+  }
+  #toast.error { background: #d92027; }
 
   /* 预览弹层 */
   #preview {
@@ -260,6 +299,28 @@
   </div>
 </div>
 
+<div id="del-confirm" class="hidden modal-mask" onclick="if(event.target===this)closeDelConfirm()">
+  <div class="modal-box">
+    <div class="modal-title">⚠️ 删除 <span id="del-path"></span>？</div>
+    <div class="modal-desc">
+      此操作会把该条目从知识库彻底移除（历史版本仍在 git 中保留，可恢复）。<br>
+      智能删除还会调用 Agent 扫描全库、清理所有指向它的引用，耗时较长。
+    </div>
+    <div class="modal-actions">
+      <button class="danger" onclick="doDelete('quick')">快速删除</button>
+      <button class="danger" onclick="doDelete('smart')">智能删除（Agent 清理引用）</button>
+      <button class="ghost" onclick="closeDelConfirm()">取消</button>
+    </div>
+    <div class="modal-hint">快速删除：垃圾/普通文件，立即执行 · 智能删除：知识页面，Agent 自动清理全库引用与索引</div>
+  </div>
+</div>
+
+<div id="del-overlay" class="hidden">
+  <div class="del-spin-box"><span class="spinner"></span>智能删除中：Agent 正在扫描全库并清理引用…</div>
+</div>
+
+<div id="toast" class="hidden"></div>
+
 <script>
 const $ = id => document.getElementById(id);
 
@@ -307,6 +368,9 @@ function onLocked() {
   $("import-msg").innerHTML = "";
   $("import-skipped").innerHTML = "";
   closePreview();
+  closeDelConfirm();
+  $("del-overlay").classList.add("hidden");
+  $("toast").classList.add("hidden");
   G.nodes = []; G.edges = []; G.raw = null; graphDirty = true;
   cancelAnimationFrame(G.raf);
   const ctx = $("graph-canvas").getContext("2d");
@@ -648,6 +712,8 @@ async function loadTree() {
   $("tree-view").appendChild(renderTreeNode(tree));
 }
 
+const PROTECTED_FILES = ["index.md", "schema.md", "log.md"];
+
 function renderTreeNode(node) {
   const ul = document.createElement("ul");
   for (const child of (node.children || [])) {
@@ -655,7 +721,17 @@ function renderTreeNode(node) {
     li.className = child.type;
     const row = document.createElement("div");
     row.className = "row";
-    row.textContent = child.name;
+    const label = document.createElement("span");
+    label.textContent = child.name;
+    row.appendChild(label);
+    if (child.path && !PROTECTED_FILES.includes(child.path)) {
+      const del = document.createElement("span");
+      del.className = "del";
+      del.textContent = "🗑";
+      del.title = "删除";
+      del.onclick = e => { e.stopPropagation(); askDelete(child.path); };
+      row.appendChild(del);
+    }
     li.appendChild(row);
     if (child.type === "dir") {
       row.onclick = () => li.classList.toggle("closed");
@@ -734,6 +810,61 @@ async function openPage(path) {
 
 function closePreview() {
   $("preview").classList.add("hidden");
+}
+
+/* ============ 删除（快速 + 智能） ============ */
+let toastTimer = null;
+function toast(text, isError) {
+  const t = $("toast");
+  t.textContent = text;
+  t.className = isError ? "error" : "";
+  t.classList.remove("hidden");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.add("hidden"), 6000);
+}
+
+let delTarget = null;
+
+function askDelete(path) {
+  delTarget = path;
+  $("del-path").textContent = path;
+  $("del-confirm").classList.remove("hidden");
+}
+
+function closeDelConfirm() {
+  $("del-confirm").classList.add("hidden");
+  delTarget = null;
+}
+
+async function doDelete(mode) {
+  const path = delTarget;
+  closeDelConfirm();
+  if (!path) return;
+  if (mode === "smart") $("del-overlay").classList.remove("hidden");
+  try {
+    const resp = await fetch("/api/wiki/entry", {
+      method: "DELETE", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({path, mode})
+    });
+    const body = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      toast(friendly(resp.status, body), true);
+      return;
+    }
+    let msg = `已删除 ${path}（${body.files_removed} 个文件），文件树/图谱已更新`;
+    if (body.degraded) msg = `已删除 ${path}（${body.files_removed} 个文件）—— 未配置 LLM，已降级为快速删除`;
+    toast(msg, false);
+    if (body.answer) {
+      $("preview").classList.remove("hidden");
+      $("preview-path").textContent = "智能删除清理报告：" + path;
+      $("preview-content").innerHTML = renderMd(body.answer);
+    }
+    loadTree(); graphDirty = true; loadGraph();
+  } catch (e) {
+    toast("网络错误：" + e, true);
+  } finally {
+    $("del-overlay").classList.add("hidden");
+  }
 }
 
 async function openByStem(stem) {
