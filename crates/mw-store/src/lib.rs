@@ -6,4 +6,4 @@
 pub mod container;
 pub mod vault;
 
-pub use vault::Vault;
+pub use vault::{DecryptedSession, Vault};

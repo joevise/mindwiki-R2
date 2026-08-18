@@ -1,12 +1,9 @@
 //! 密钥闸门：所有解密必须过闸。一键关闭 = 密钥 zeroize + 会话终止。
+//! 内核：besure::crypto::VaultCrypto（Argon2id 派生 + AES-256-GCM）。
 
-use anyhow::{bail, Result};
-use std::sync::atomic::{AtomicBool, Ordering};
+use anyhow::{anyhow, bail, Result};
+use besure::crypto::VaultCrypto;
 use std::sync::Mutex;
-use zeroize::Zeroizing;
-
-/// 派生密钥（Zeroizing：drop 时自动清零内存）
-pub struct SessionKey(pub Zeroizing<Vec<u8>>);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GatewayState {
@@ -15,32 +12,108 @@ pub enum GatewayState {
 }
 
 pub struct KeyGateway {
-    state: AtomicBool, // true = open
-    // TODO Step2: 接 besure::VaultCrypto 做 Argon2id 派生 + AES-256-GCM
-    _key_slot: Mutex<Option<SessionKey>>,
+    crypto: Mutex<Option<VaultCrypto>>,
+    salt: Vec<u8>,
+    verify_token: Mutex<Option<Vec<u8>>>,
 }
 
 impl KeyGateway {
-    pub fn new() -> Self {
-        Self { state: AtomicBool::new(false), _key_slot: Mutex::new(None) }
+    /// 新建（init 用）：随机 salt，未解锁
+    pub fn new() -> Result<Self> {
+        let crypto = VaultCrypto::new().map_err(|e| anyhow!(e.to_string()))?;
+        Ok(Self {
+            salt: crypto.salt().to_vec(),
+            crypto: Mutex::new(Some(crypto)),
+            verify_token: Mutex::new(None),
+        })
+    }
+
+    /// 从已有容器加载（open_session 用）：salt + 密码验证令牌
+    pub fn from_container(salt: Vec<u8>, verify_token: Vec<u8>) -> Self {
+        Self {
+            crypto: Mutex::new(Some(VaultCrypto::from_salt(salt.clone()))),
+            salt,
+            verify_token: Mutex::new(Some(verify_token)),
+        }
+    }
+
+    pub fn salt(&self) -> &[u8] {
+        &self.salt
     }
 
     pub fn state(&self) -> GatewayState {
-        if self.state.load(Ordering::SeqCst) { GatewayState::Open } else { GatewayState::Closed }
+        let slot = self.crypto.lock().unwrap();
+        match slot.as_ref() {
+            Some(c) if c.is_unlocked() => GatewayState::Open,
+            _ => GatewayState::Closed,
+        }
     }
 
-    /// 客户开启闸门（本地密码 / 远程授权都汇到这）
-    pub fn open(&self, _password: &str) -> Result<()> {
-        self.state.store(true, Ordering::SeqCst);
-        Ok(())
+    /// 开启闸门：Argon2id 派生密钥；有验证令牌时先验密码
+    pub fn open(&self, password: &str) -> Result<()> {
+        let token = self.verify_token.lock().unwrap().clone();
+        let mut slot = self.crypto.lock().unwrap();
+        let crypto = slot
+            .as_mut()
+            .ok_or_else(|| anyhow!("key gateway destroyed — create a new gateway"))?;
+        match token {
+            Some(t) => {
+                let ok = crypto
+                    .unlock_with_verify(password, &t)
+                    .map_err(|e| anyhow!(e.to_string()))?;
+                if ok {
+                    Ok(())
+                } else {
+                    bail!("wrong password")
+                }
+            }
+            None => {
+                crypto.unlock(password);
+                Ok(())
+            }
+        }
     }
 
-    /// 一键关闭：密钥清零、状态闭锁。此后所有解密请求被拒绝。
+    /// 取密码验证令牌（init 时生成，调用方负责持久化进容器）
+    pub fn ensure_verify_token(&self) -> Result<Vec<u8>> {
+        let mut token_slot = self.verify_token.lock().unwrap();
+        if let Some(t) = token_slot.as_ref() {
+            return Ok(t.clone());
+        }
+        let slot = self.crypto.lock().unwrap();
+        let crypto = slot.as_ref().ok_or_else(|| anyhow!("key gateway closed"))?;
+        let t = crypto
+            .generate_verify_token()
+            .map_err(|e| anyhow!(e.to_string()))?;
+        *token_slot = Some(t.clone());
+        Ok(t)
+    }
+
+    /// 一键关闭：密钥 zeroize（VaultCrypto::lock），此后一切密文为噪声
     pub fn close(&self) {
-        let mut slot = self._key_slot.lock().unwrap();
-        *slot = None; // Zeroizing drop 自动清零
-        self.state.store(false, Ordering::SeqCst);
-        // TODO Step3: 终止所有活跃 DecryptedSession
+        let mut slot = self.crypto.lock().unwrap();
+        if let Some(c) = slot.as_mut() {
+            c.lock();
+        }
+        *slot = None;
+    }
+
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        self.guard()?;
+        let slot = self.crypto.lock().unwrap();
+        slot.as_ref()
+            .unwrap()
+            .encrypt(plaintext)
+            .map_err(|e| anyhow!(e.to_string()))
+    }
+
+    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        self.guard()?;
+        let slot = self.crypto.lock().unwrap();
+        slot.as_ref()
+            .unwrap()
+            .decrypt(ciphertext)
+            .map_err(|e| anyhow!(e.to_string()))
     }
 
     /// 解密前置检查
@@ -52,21 +125,37 @@ impl KeyGateway {
     }
 }
 
-impl Default for KeyGateway {
-    fn default() -> Self { Self::new() }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn gateway_close_blocks_decryption() {
-        let gw = KeyGateway::new();
+    fn gateway_close_blocks_decrypt() {
+        let gw = KeyGateway::new().unwrap();
         gw.open("pw").unwrap();
         assert!(gw.guard().is_ok());
+        let ct = gw.encrypt(b"hello").unwrap();
+        assert_eq!(gw.decrypt(&ct).unwrap(), b"hello");
         gw.close();
         assert!(gw.guard().is_err());
+        assert!(gw.decrypt(&ct).is_err());
         assert_eq!(gw.state(), GatewayState::Closed);
+    }
+
+    #[test]
+    fn wrong_password_rejected_by_gateway() {
+        let gw = KeyGateway::new().unwrap();
+        gw.open("pw-A").unwrap();
+        let token = gw.ensure_verify_token().unwrap();
+        let salt = gw.salt().to_vec();
+        gw.close();
+
+        let gw2 = KeyGateway::from_container(salt.clone(), token.clone());
+        assert!(gw2.open("pw-B").is_err());
+        assert_eq!(gw2.state(), GatewayState::Closed);
+
+        let gw3 = KeyGateway::from_container(salt, token);
+        gw3.open("pw-A").unwrap();
+        assert_eq!(gw3.state(), GatewayState::Open);
     }
 }

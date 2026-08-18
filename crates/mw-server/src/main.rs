@@ -33,6 +33,27 @@ async fn main() -> Result<()> {
                 println!("  {} — {}", s.name, s.path.display());
             }
         }
+        Some("init") => {
+            let password = flag_value(&args, "--password")
+                .ok_or_else(|| anyhow!("usage: mindwiki init --password ***"))?;
+            let vault = mw_store::Vault::open(std::env::current_dir()?)?;
+            let gateway = mw_crypto::KeyGateway::new()?;
+            vault.init(&gateway, &password)?;
+            println!("vault initialized: {}", vault.container_path().display());
+        }
+        Some("status") => {
+            let vault = mw_store::Vault::open(std::env::current_dir()?)?;
+            if !vault.exists() {
+                println!("no vault in current directory (run: mindwiki init --password ***)");
+            } else {
+                let data = std::fs::read(vault.container_path())?;
+                let (version, _) = mw_store::container::validate(&data)?;
+                println!("vault:   {}", vault.container_path().display());
+                println!("size:    {} bytes", data.len());
+                println!("version: {version}");
+                println!("state:   sealed (ciphertext at rest)");
+            }
+        }
         Some("ask") => {
             let question = args
                 .get(2)
@@ -44,12 +65,19 @@ async fn main() -> Result<()> {
         }
         Some(other) => {
             eprintln!("unknown command: {other}");
-            eprintln!("usage: mindwiki <version|skills|ask>");
+            eprintln!("usage: mindwiki <version|skills|init|status|ask>");
         }
         None => {
             println!("mindwiki {} — 企业级安全 AI 知识库", env!("CARGO_PKG_VERSION"));
-            println!("commands: version | skills | ask");
+            println!("commands: version | skills | init | status | ask");
         }
     }
     Ok(())
+}
+
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
