@@ -116,12 +116,13 @@ impl KeyGateway {
     /// 一键关闭：密钥 zeroize + 终止全部活跃会话 + 记录审计时间。
     /// 被终止会话的 Drop 不做 seal、直接销毁，此后一切密文为噪声。
     pub fn close(&self) {
+        // 密钥 zeroize 即达成安全语义；保留 VaultCrypto 对象（已锁定态），
+        // 同一闸门可凭主密码重新 open（网页 UI 锁定→再解锁的真实路径）。
         {
             let mut slot = self.crypto.lock().unwrap();
             if let Some(c) = slot.as_mut() {
                 c.lock();
             }
-            *slot = None;
         }
         let mut sessions = self.sessions.lock().unwrap();
         for handle in sessions.values() {
