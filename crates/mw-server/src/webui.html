@@ -17,7 +17,7 @@
   }
   header h1 { font-size: 24px; letter-spacing: 1px; }
   header .tag { font-size: 12px; color: #666; }
-  main { max-width: 720px; margin: 0 auto; padding: 24px 32px 64px; }
+  main { max-width: 1200px; margin: 0 auto; padding: 24px 32px 64px; }
   .statusbar {
     display: flex; align-items: center; gap: 10px;
     border: 1px solid #ddd; border-left: 6px solid #d92027;
@@ -67,6 +67,55 @@
     font-size: 15px; z-index: 10;
   }
   .files { font-size: 12px; color: #666; margin-top: 8px; }
+
+  /* Wiki 浏览器 */
+  .tabs { display: flex; gap: 0; border-bottom: 2px solid #111; margin-bottom: 0; }
+  .tabs button {
+    background: #fff; color: #111; border: 1px solid #ddd; border-bottom: none;
+    padding: 8px 20px; font-size: 14px; margin-right: 4px;
+  }
+  .tabs button.active { background: #111; color: #fff; }
+  .browser { display: flex; border: 1px solid #ddd; border-top: none; min-height: 560px; }
+  .pane-left {
+    width: 340px; min-width: 340px; border-right: 1px solid #ddd;
+    padding: 12px; overflow: auto; position: relative;
+  }
+  .pane-left.wide { width: 640px; }
+  .pane-right { flex: 1; padding: 20px 28px; overflow: auto; }
+  #page-view:empty::before { content: "点击左侧文件树或图谱节点查看页面"; color: #999; font-size: 13px; }
+  .tree ul { list-style: none; padding-left: 16px; }
+  .tree > ul { padding-left: 0; }
+  .tree li { font-size: 13px; line-height: 1.9; }
+  .tree .dir > .row { cursor: pointer; font-weight: 600; }
+  .tree .dir > .row::before { content: "▾ "; color: #d92027; }
+  .tree .dir.closed > .row::before { content: "▸ "; color: #d92027; }
+  .tree .dir.closed > ul { display: none; }
+  .tree .file > .row { cursor: pointer; }
+  .tree .file > .row::before { content: "· "; color: #999; }
+  .tree .row:hover { color: #d92027; }
+  #graph-wrap { position: relative; }
+  #graph-canvas { display: block; cursor: grab; }
+  #graph-legend {
+    position: absolute; left: 10px; bottom: 10px; font-size: 11px;
+    background: rgba(255,255,255,.9); border: 1px solid #ddd; padding: 8px 10px;
+    line-height: 1.8; pointer-events: none;
+  }
+  #graph-legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+  #page-view { font-size: 14px; line-height: 1.8; }
+  #page-view h1, #page-view h2, #page-view h3, #page-view h4 { margin: 14px 0 8px; }
+  #page-view h1 { font-size: 22px; border-bottom: 2px solid #d92027; padding-bottom: 6px; }
+  #page-view h2 { font-size: 18px; }
+  #page-view h3 { font-size: 15px; }
+  #page-view p { margin: 8px 0; }
+  #page-view ul { padding-left: 22px; margin: 8px 0; }
+  #page-view blockquote {
+    border-left: 3px solid #d92027; padding: 4px 12px; margin: 8px 0;
+    color: #555; background: #fafafa;
+  }
+  #page-view code { background: #f2f2f2; padding: 1px 5px; font-size: 13px; }
+  #page-view pre { background: #f7f7f7; border: 1px solid #e5e5e5; padding: 12px; overflow: auto; margin: 8px 0; }
+  #page-view pre code { background: none; padding: 0; }
+  #page-view a.wl { color: #3B82F6; text-decoration: none; border-bottom: 1px dashed #3B82F6; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -113,6 +162,24 @@
     </div>
 
     <div class="card">
+      <h2>Wiki 浏览器</h2>
+      <div class="tabs">
+        <button id="tab-tree" class="active" onclick="switchTab('tree')">文件树</button>
+        <button id="tab-graph" onclick="switchTab('graph')">图谱</button>
+      </div>
+      <div class="browser">
+        <div class="pane-left" id="pane-left">
+          <div id="tree-view" class="tree"></div>
+          <div id="graph-wrap" class="hidden">
+            <canvas id="graph-canvas"></canvas>
+            <div id="graph-legend"></div>
+          </div>
+        </div>
+        <div class="pane-right" id="page-view"></div>
+      </div>
+    </div>
+
+    <div class="card">
       <button class="lock" onclick="doLock()">🔒 一键锁定</button>
       <div class="msg" id="lock-msg"></div>
     </div>
@@ -143,6 +210,8 @@ function busy(on, text) {
   if (text) $("overlay-text").textContent = text;
 }
 
+let wasOpen = false;
+
 async function refresh() {
   try {
     const st = await (await fetch("/api/vault/status")).json();
@@ -155,9 +224,22 @@ async function refresh() {
     $("card-init").classList.toggle("hidden", st.exists);
     $("card-unlock").classList.toggle("hidden", !st.exists || open);
     $("section-open").classList.toggle("hidden", !open);
+    if (open && !wasOpen) onUnlocked();
+    if (!open && wasOpen) onLocked();
+    wasOpen = open;
   } catch (e) {
     $("status-text").textContent = "服务连接失败";
   }
+}
+
+function onUnlocked() { loadTree(); graphDirty = true; }
+function onLocked() {
+  $("tree-view").innerHTML = "";
+  $("page-view").innerHTML = "";
+  G.nodes = []; G.edges = []; G.raw = null; graphDirty = true;
+  cancelAnimationFrame(G.raf);
+  const ctx = $("graph-canvas").getContext("2d");
+  ctx && ctx.clearRect(0, 0, 9999, 9999);
 }
 
 async function doInit() {
@@ -206,6 +288,7 @@ async function doIngest() {
       $("ingest-files").textContent =
         body.files && body.files.length ? "变更文件：" + body.files.join(", ") : "";
       $("ingest-file").value = "";
+      loadTree(); graphDirty = true;
     } else {
       showMsg("ingest-msg", friendly(resp.status, body), true);
     }
@@ -229,6 +312,7 @@ async function doQuery() {
       $("answer").textContent = body.answer || "";
       $("answer").classList.remove("hidden");
       showMsg("query-msg", body.sealed ? "（答案已沉淀入库）" : "", false);
+      if (body.sealed) { loadTree(); graphDirty = true; }
     } else {
       showMsg("query-msg", friendly(resp.status, body), true);
     }
@@ -257,6 +341,293 @@ async function doLock() {
     showMsg("lock-msg", "admin token 无效", true);
   }
 }
+
+/* ============ 标签页 ============ */
+let graphDirty = true;
+function switchTab(tab) {
+  $("tab-tree").classList.toggle("active", tab === "tree");
+  $("tab-graph").classList.toggle("active", tab === "graph");
+  $("tree-view").classList.toggle("hidden", tab !== "tree");
+  $("graph-wrap").classList.toggle("hidden", tab !== "graph");
+  $("pane-left").classList.toggle("wide", tab === "graph");
+  if (tab === "graph") loadGraph();
+}
+
+/* ============ 文件树 ============ */
+async function loadTree() {
+  const resp = await fetch("/api/wiki/tree");
+  if (!resp.ok) return;
+  const tree = await resp.json();
+  $("tree-view").innerHTML = "";
+  $("tree-view").appendChild(renderTreeNode(tree));
+}
+
+function renderTreeNode(node) {
+  const ul = document.createElement("ul");
+  for (const child of (node.children || [])) {
+    const li = document.createElement("li");
+    li.className = child.type;
+    const row = document.createElement("div");
+    row.className = "row";
+    row.textContent = child.name;
+    li.appendChild(row);
+    if (child.type === "dir") {
+      row.onclick = () => li.classList.toggle("closed");
+      li.appendChild(renderTreeNode(child));
+    } else {
+      row.onclick = () => openPage(child.path);
+    }
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+/* ============ 轻量 Markdown 渲染器 ============ */
+function escHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function inlineMd(s) {
+  s = escHtml(s);
+  s = s.replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]/g,
+    (m, t, label) => `<a class="wl" data-target="${t.trim()}">${label || t.trim()}</a>`);
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+  return s;
+}
+function renderMd(src) {
+  const lines = src.split("\n");
+  let html = "", inCode = false, inList = false, inFm = false, first = true;
+  const closeList = () => { if (inList) { html += "</ul>"; inList = false; } };
+  for (const line of lines) {
+    const t = line.trim();
+    if (first && t === "---") { inFm = true; first = false; continue; }
+    first = false;
+    if (inFm) { if (t === "---") inFm = false; continue; }
+    if (t.startsWith("```")) {
+      closeList();
+      html += inCode ? "</code></pre>" : "<pre><code>";
+      inCode = !inCode; continue;
+    }
+    if (inCode) { html += escHtml(line) + "\n"; continue; }
+    let m;
+    if ((m = t.match(/^(#{1,4})\s+(.*)/))) {
+      closeList();
+      html += `<h${m[1].length}>${inlineMd(m[2])}</h${m[1].length}>`;
+    } else if ((m = t.match(/^[-*]\s+(.*)/))) {
+      if (!inList) { html += "<ul>"; inList = true; }
+      html += `<li>${inlineMd(m[1])}</li>`;
+    } else if ((m = t.match(/^&gt;\s?(.*)/)) || (m = t.match(/^>\s?(.*)/))) {
+      closeList();
+      html += `<blockquote>${inlineMd(m[1])}</blockquote>`;
+    } else if (t === "") {
+      closeList();
+    } else {
+      closeList();
+      html += `<p>${inlineMd(line)}</p>`;
+    }
+  }
+  closeList();
+  if (inCode) html += "</code></pre>";
+  return html;
+}
+
+async function openPage(path) {
+  const resp = await fetch("/api/wiki/page?path=" + encodeURIComponent(path));
+  const body = await resp.json().catch(() => null);
+  if (!resp.ok) { $("page-view").textContent = friendly(resp.status, body); return; }
+  $("page-view").innerHTML = renderMd(body.content || "");
+  $("page-view").querySelectorAll("a.wl").forEach(a => {
+    a.onclick = e => { e.preventDefault(); openByStem(a.dataset.target); };
+  });
+}
+
+async function openByStem(stem) {
+  if (!G.raw) {
+    const resp = await fetch("/api/wiki/graph");
+    if (resp.ok) G.raw = await resp.json();
+  }
+  const node = (G.raw && G.raw.nodes || []).find(n => n.label === stem);
+  if (node) openPage(node.id);
+}
+
+/* ============ 图谱（canvas 力导向） ============ */
+const TYPE_COLORS = {
+  "index": "#1B1D22", "concept": "#F5453D", "algorithm": "#E0941F",
+  "paper": "#3B82F6", "experiment": "#0E9C8E", "source-record": "#9AA0AA",
+  "page": "#6B7280"
+};
+const LEGEND = [
+  ["index", "索引"], ["concept", "概念"], ["algorithm", "算法"],
+  ["paper", "论文"], ["experiment", "实验"], ["source-record", "原始记录"], ["page", "页面"]
+];
+const G = {
+  nodes: [], edges: [], raw: null,
+  k: 1, tx: 0, ty: 0, hover: null, drag: null, pan: null,
+  frame: 0, raf: 0, moved: false
+};
+
+async function loadGraph() {
+  if (!graphDirty && G.raw) { drawGraph(); return; }
+  const resp = await fetch("/api/wiki/graph");
+  if (!resp.ok) return;
+  G.raw = await resp.json();
+  graphDirty = false;
+  const canvas = $("graph-canvas");
+  const w = $("pane-left").clientWidth - 24, h = 560;
+  canvas.width = w; canvas.height = h;
+  canvas.style.width = w + "px"; canvas.style.height = h + "px";
+  const deg = {};
+  for (const e of G.raw.edges) {
+    deg[e.from] = (deg[e.from] || 0) + 1;
+    deg[e.to] = (deg[e.to] || 0) + 1;
+  }
+  G.nodes = G.raw.nodes.map((n, i) => ({
+    id: n.id, label: n.label, type: n.type,
+    r: 6 + (deg[n.id] || 0) * 2,
+    x: Math.cos(i * 2.399) * (60 + i * 12), y: Math.sin(i * 2.399) * (60 + i * 12),
+    vx: 0, vy: 0, fixed: false
+  }));
+  const idx = {};
+  G.nodes.forEach((n, i) => idx[n.id] = i);
+  G.edges = G.raw.edges
+    .filter(e => idx[e.from] !== undefined && idx[e.to] !== undefined)
+    .map(e => [idx[e.from], idx[e.to]]);
+  G.k = 1; G.tx = w / 2; G.ty = h / 2; G.frame = 0;
+  cancelAnimationFrame(G.raf);
+  tick();
+  $("graph-legend").innerHTML = LEGEND.map(([t, name]) =>
+    `<div><span class="sw" style="background:${TYPE_COLORS[t]}"></span>${name}</div>`).join("");
+}
+
+function tick() {
+  const ns = G.nodes, cx = 0, cy = 0;
+  for (let i = 0; i < ns.length; i++) {
+    const a = ns[i];
+    let fx = (cx - a.x) * 0.002, fy = (cy - a.y) * 0.002;
+    for (let j = 0; j < ns.length; j++) {
+      if (i === j) continue;
+      const b = ns[j];
+      let dx = a.x - b.x, dy = a.y - b.y;
+      let d2 = dx * dx + dy * dy || 1;
+      const f = 3000 / d2;
+      fx += dx * f / Math.sqrt(d2); fy += dy * f / Math.sqrt(d2);
+    }
+    a.fx = fx; a.fy = fy;
+  }
+  for (const [i, j] of G.edges) {
+    const a = ns[i], b = ns[j];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const d = Math.sqrt(dx * dx + dy * dy) || 1;
+    const f = (d - 110) * 0.01;
+    a.fx += dx / d * f; a.fy += dy / d * f;
+    b.fx -= dx / d * f; b.fy -= dy / d * f;
+  }
+  for (const n of ns) {
+    if (n.fixed) continue;
+    n.vx = (n.vx + n.fx) * 0.6; n.vy = (n.vy + n.fy) * 0.6;
+    n.x += n.vx; n.y += n.vy;
+  }
+  drawGraph();
+  if (++G.frame < 300) G.raf = requestAnimationFrame(tick);
+}
+
+function drawGraph() {
+  const canvas = $("graph-canvas");
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(G.k, 0, 0, G.k, G.tx, G.ty);
+  const adj = new Set();
+  if (G.hover !== null) {
+    adj.add(G.hover);
+    for (const [i, j] of G.edges) {
+      if (i === G.hover) adj.add(j);
+      if (j === G.hover) adj.add(i);
+    }
+  }
+  const dim = G.hover !== null;
+  ctx.lineWidth = 1 / G.k;
+  for (const [i, j] of G.edges) {
+    const hot = dim && adj.has(i) && adj.has(j) && (i === G.hover || j === G.hover);
+    ctx.strokeStyle = dim ? (hot ? "#F5453D" : "rgba(150,150,150,0.12)") : "#c9cdd4";
+    ctx.beginPath();
+    ctx.moveTo(G.nodes[i].x, G.nodes[i].y);
+    ctx.lineTo(G.nodes[j].x, G.nodes[j].y);
+    ctx.stroke();
+  }
+  G.nodes.forEach((n, i) => {
+    const alpha = dim && !adj.has(i) ? 0.15 : 1;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = TYPE_COLORS[n.type] || TYPE_COLORS.page;
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+    ctx.fill();
+    if (i === G.hover) {
+      ctx.strokeStyle = "#1B1D22"; ctx.lineWidth = 2 / G.k;
+      ctx.stroke();
+    }
+    ctx.fillStyle = "#1B1D22";
+    ctx.font = `${11 / G.k}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillText(n.label, n.x, n.y + n.r + 12 / G.k);
+    ctx.globalAlpha = 1;
+  });
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+function graphPos(e) {
+  const rect = $("graph-canvas").getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  return { mx, my, wx: (mx - G.tx) / G.k, wy: (my - G.ty) / G.k };
+}
+function nodeAt(wx, wy) {
+  for (let i = G.nodes.length - 1; i >= 0; i--) {
+    const n = G.nodes[i];
+    const dx = wx - n.x, dy = wy - n.y;
+    if (dx * dx + dy * dy <= (n.r + 3) * (n.r + 3)) return i;
+  }
+  return null;
+}
+
+(function initGraphEvents() {
+  const canvas = $("graph-canvas");
+  canvas.addEventListener("mousedown", e => {
+    const p = graphPos(e);
+    const i = nodeAt(p.wx, p.wy);
+    G.moved = false;
+    if (i !== null) { G.drag = i; G.nodes[i].fixed = true; }
+    else G.pan = { x: p.mx, y: p.my, tx: G.tx, ty: G.ty };
+  });
+  canvas.addEventListener("mousemove", e => {
+    const p = graphPos(e);
+    if (G.drag !== null) {
+      G.nodes[G.drag].x = p.wx; G.nodes[G.drag].y = p.wy;
+      G.moved = true; drawGraph(); return;
+    }
+    if (G.pan) {
+      G.tx = G.pan.tx + p.mx - G.pan.x; G.ty = G.pan.ty + p.my - G.pan.y;
+      G.moved = true; drawGraph(); return;
+    }
+    const i = nodeAt(p.wx, p.wy);
+    if (i !== G.hover) { G.hover = i; drawGraph(); }
+    canvas.style.cursor = i !== null ? "pointer" : "grab";
+  });
+  canvas.addEventListener("mouseup", e => {
+    if (G.drag !== null && !G.moved) openPage(G.nodes[G.drag].id);
+    G.drag = null; G.pan = null;
+  });
+  canvas.addEventListener("mouseleave", () => {
+    G.drag = null; G.pan = null; G.hover = null; drawGraph();
+  });
+  canvas.addEventListener("wheel", e => {
+    e.preventDefault();
+    const p = graphPos(e);
+    const k2 = Math.min(4, Math.max(0.2, G.k * (e.deltaY < 0 ? 1.12 : 0.89)));
+    G.tx = p.mx - (p.mx - G.tx) * (k2 / G.k);
+    G.ty = p.my - (p.my - G.ty) * (k2 / G.k);
+    G.k = k2; drawGraph();
+  }, {passive: false});
+})();
 
 refresh();
 setInterval(refresh, 3000);

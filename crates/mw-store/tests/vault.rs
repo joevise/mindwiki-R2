@@ -1,6 +1,7 @@
 //! Step 2 验收测试：加密容器 + Git 版本管理 + 内存解密。
 
 use mw_crypto::KeyGateway;
+use std::sync::Arc;
 use mw_store::{container, Vault};
 
 fn read_container(vault: &Vault) -> container::ContainerData {
@@ -8,9 +9,9 @@ fn read_container(vault: &Vault) -> container::ContainerData {
     container::decode(&data).unwrap()
 }
 
-fn reopen_gateway(vault: &Vault, password: &str) -> KeyGateway {
+fn reopen_gateway(vault: &Vault, password: &str) -> Arc<KeyGateway> {
     let c = read_container(vault);
-    let gw = KeyGateway::from_container(c.salt.clone(), c.verify_token.clone());
+    let gw = Arc::new(KeyGateway::from_container(c.salt.clone(), c.verify_token.clone()));
     gw.open(password).unwrap();
     gw
 }
@@ -20,7 +21,7 @@ fn vault_roundtrip() {
     let tmp = tempfile::tempdir().unwrap();
     let vault = Vault::open(tmp.path()).unwrap();
 
-    let gw = KeyGateway::new().unwrap();
+    let gw = Arc::new(KeyGateway::new().unwrap());
     vault.init(&gw, "pw-A").unwrap();
     assert!(vault.exists());
 
@@ -66,7 +67,7 @@ fn vault_roundtrip() {
 fn wrong_password_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let vault = Vault::open(tmp.path()).unwrap();
-    let gw = KeyGateway::new().unwrap();
+    let gw = Arc::new(KeyGateway::new().unwrap());
     vault.init(&gw, "pw-A").unwrap();
     gw.close();
 
@@ -80,7 +81,7 @@ fn wrong_password_rejected() {
 fn disk_is_ciphertext() {
     let tmp = tempfile::tempdir().unwrap();
     let vault = Vault::open(tmp.path()).unwrap();
-    let gw = KeyGateway::new().unwrap();
+    let gw = Arc::new(KeyGateway::new().unwrap());
     vault.init(&gw, "pw-A").unwrap();
     {
         let session = vault.open_session(&gw).unwrap();
@@ -97,7 +98,7 @@ fn disk_is_ciphertext() {
 fn close_terminates_sessions() {
     let tmp = tempfile::tempdir().unwrap();
     let vault = Vault::open(tmp.path()).unwrap();
-    let gw = KeyGateway::new().unwrap();
+    let gw = Arc::new(KeyGateway::new().unwrap());
     vault.init(&gw, "pw-A").unwrap();
 
     let session = vault.open_session(&gw).unwrap();
@@ -123,7 +124,7 @@ fn close_terminates_sessions() {
 fn terminated_session_not_sealed() {
     let tmp = tempfile::tempdir().unwrap();
     let vault = Vault::open(tmp.path()).unwrap();
-    let gw = KeyGateway::new().unwrap();
+    let gw = Arc::new(KeyGateway::new().unwrap());
     vault.init(&gw, "pw-A").unwrap();
 
     // 先封印一版 v1
@@ -161,7 +162,7 @@ fn admin_token_file_created_on_init() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();
     let vault = Vault::open(tmp.path()).unwrap();
-    let gw = KeyGateway::new().unwrap();
+    let gw = Arc::new(KeyGateway::new().unwrap());
     vault.init(&gw, "pw-A").unwrap();
 
     let path = vault.admin_token_path();

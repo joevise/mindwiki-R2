@@ -16,14 +16,15 @@ pub struct Vault {
 
 /// 解密会话（受控临时目录，drop 时销毁）。
 /// 注册到 gateway 的会话注册表；被终止（terminate=true）时 drop 不做 seal、直接销毁。
-pub struct DecryptedSession<'a> {
+/// 注册表以 Arc 持有：会话可长驻于 AppState，不借用 gateway 生命周期。
+pub struct DecryptedSession {
     tmp: tempfile::TempDir,
     session_id: String,
     terminate: Arc<AtomicBool>,
-    registry: Option<&'a dyn SessionRegistry>,
+    registry: Option<Arc<dyn SessionRegistry>>,
 }
 
-impl DecryptedSession<'_> {
+impl DecryptedSession {
     pub fn work_dir(&self) -> &Path {
         self.tmp.path()
     }
@@ -76,13 +77,13 @@ impl DecryptedSession<'_> {
 
     /// 从注册表注销（幂等）
     fn unregister(&self) {
-        if let Some(reg) = self.registry {
+        if let Some(reg) = &self.registry {
             reg.unregister(&self.session_id);
         }
     }
 }
 
-impl Drop for DecryptedSession<'_> {
+impl Drop for DecryptedSession {
     /// 被终止的会话：不 seal、直接销毁临时目录（数据丢弃，容器保持旧状态）。
     /// 正常会话：注销后销毁临时目录（TempDir drop 删除明文）。
     fn drop(&mut self) {
@@ -142,7 +143,7 @@ impl Vault {
     }
 
     /// 打开解密会话：解密容器 → 展开 tar 到受控临时目录 → 注册到 gateway 会话表
-    pub fn open_session<'a>(&self, gateway: &'a KeyGateway) -> Result<DecryptedSession<'a>> {
+    pub fn open_session(&self, gateway: &Arc<KeyGateway>) -> Result<DecryptedSession> {
         gateway.guard()?;
         let data = fs::read(self.container_path()).context("read vault container")?;
         let c = container::decode(&data)?;
@@ -156,7 +157,7 @@ impl Vault {
             tmp,
             session_id,
             terminate,
-            registry: Some(gateway),
+            registry: Some(gateway.clone()),
         })
     }
 
