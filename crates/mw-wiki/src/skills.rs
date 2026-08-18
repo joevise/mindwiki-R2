@@ -45,10 +45,8 @@ impl SkillLoader {
         let mut buf = String::new();
         for s in &skills {
             buf.push_str(&format!(
-                "\n---\n# Skill: {} (at {})\n{}\n",
-                s.name,
-                s.path.display(),
-                s.markdown
+                "\n---\n# Skill: {}\n{}\n",
+                s.name, s.markdown
             ));
         }
         Ok(buf)

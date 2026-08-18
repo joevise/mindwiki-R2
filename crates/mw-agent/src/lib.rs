@@ -111,7 +111,10 @@ impl WikiAgent {
     pub fn system_prompt(&self) -> Result<String> {
         let loader = SkillLoader::new(&self.skills_root);
         let mut prompt = String::from(
-            "你是 Mind Wiki 的知识库引擎。严格遵守 skills 中的方法与铁律。\n",
+            "你是 Mind Wiki 的知识库引擎。严格遵守 skills 中的方法与铁律。\n\n\
+             铁律：当前工作目录就是知识库根目录。所有文件读写、git 操作一律在当前目录内\
+            （用相对路径）；绝不 cd 到其他目录，绝不读写当前目录之外的任何路径。\
+             技能全文已注入本提示词，无需也不应去读技能文件本身。\n",
         );
         prompt.push_str(&loader.system_prompt_block()?);
         Ok(prompt)
