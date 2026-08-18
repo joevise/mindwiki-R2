@@ -1916,6 +1916,7 @@ dependencies = [
  "anyhow",
  "mw-wiki",
  "r2-core",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -1940,6 +1941,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "futures-util",
  "mw-agent",
  "mw-crypto",
  "mw-store",

@@ -21,6 +21,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 axum = { workspace = true, features = ["multipart"] }
 reqwest.workspace = true
+futures-util = "0.3"
 
 [dev-dependencies]
 tempfile.workspace = true

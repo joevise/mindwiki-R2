@@ -11,12 +11,17 @@
 //! GET  /api/wiki/tree                        → 文件树 JSON（排除 .git）
 //! GET  /api/wiki/page?path=                  → {path, content}（防路径穿越）
 //! GET  /api/wiki/graph                       → {nodes, edges}（frontmatter type + wikilink）
+//! GET  /api/llm/config                       → {provider, base_url, model, api_key_masked}
+//! POST /api/llm/config       {provider, base_url, api_key, model} → 保存 appconfig.json + 热生效
+//! POST /api/ingest/stream    multipart .md   → SSE：tool_call/message/done 实时入库进度
+//! POST /api/chat             {message}       → SSE：多轮聊天（message/done）
+//! POST /api/chat/reset                       → 清空聊天会话
 
 use anyhow::{bail, Context, Result};
 use axum::{
     extract::{Multipart, Query, State},
     http::StatusCode,
-    response::{Html, IntoResponse, Response},
+    response::{sse::Event as SseEvent, Html, IntoResponse, Response, Sse},
     routing::{get, post},
     Json, Router,
 };
@@ -41,6 +46,12 @@ pub struct AppState {
     /// 长驻解密会话：解锁即解密（open 创建），锁定即销毁（close 置 None）。
     /// ingest/query/browse 全部复用它的 work_dir；明文不落盘。
     pub current_session: tokio::sync::RwLock<Option<mw_store::DecryptedSession>>,
+    /// LLM 配置：启动时 load_or_env(appconfig.json)，POST /api/llm/config 热更新
+    pub llm: RwLock<mw_agent::LlmConfig>,
+    /// appconfig.json 路径（vault 根目录下）
+    pub config_path: PathBuf,
+    /// 多轮聊天会话：解锁后懒建复用，锁定/改模型时清空
+    pub chat: tokio::sync::Mutex<Option<mw_agent::ChatSession>>,
 }
 
 #[derive(Deserialize)]
@@ -90,6 +101,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/wiki/tree", get(tree_handler))
         .route("/api/wiki/page", get(page_handler))
         .route("/api/wiki/graph", get(graph_handler))
+        .route(
+            "/api/llm/config",
+            get(get_llm_config_handler).post(post_llm_config_handler),
+        )
+        .route("/api/ingest/stream", post(ingest_stream_handler))
+        .route("/api/chat", post(chat_handler))
+        .route("/api/chat/reset", post(chat_reset_handler))
         .with_state(state)
 }
 
@@ -105,16 +123,21 @@ fn gateway(s: &AppState) -> Arc<KeyGateway> {
     s.gateway.read().unwrap().clone()
 }
 
-/// LLM 未配置 → 503（先于闸门检查，给用户更明确的配置提示）
-fn check_llm() -> Result<(), Response> {
-    let missing = std::env::var("MW_LLM_API_KEY").map(|v| v.is_empty()).unwrap_or(true);
-    if missing {
-        return Err(err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "未配置 LLM：请设置环境变量 MW_LLM_API_KEY（可选 MW_LLM_PROVIDER / MW_LLM_BASE_URL / MW_LLM_MODEL）后重启 mindwiki serve",
-        ));
+/// LLM 未配置 → 503（先于闸门检查，给用户更明确的配置提示）。
+/// 以 AppState.llm 为准；为空时惰性从 appconfig.json / 环境变量补水（兼容启动后才配置的场景）。
+fn check_llm(s: &Arc<AppState>) -> Result<(), Response> {
+    if !s.llm.read().unwrap().api_key.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    let fresh = mw_agent::LlmConfig::load_or_env(&s.config_path);
+    if !fresh.api_key.is_empty() {
+        *s.llm.write().unwrap() = fresh;
+        return Ok(());
+    }
+    Err(err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "未配置 LLM：请在设置页填写模型配置并保存，或设置环境变量 MW_LLM_API_KEY（可选 MW_LLM_PROVIDER / MW_LLM_BASE_URL / MW_LLM_MODEL）后重启 mindwiki serve",
+    ))
 }
 
 /// 闸门关闭 → 423 Locked
@@ -190,6 +213,8 @@ async fn close_handler(
     gateway(&s).close();
     // 锁定即销毁：不 seal 未提交变更（ingest 已即时 seal）
     *s.current_session.write().await = None;
+    // 聊天会话一并清空（持有解密目录上下文，不能跨锁定存活）
+    *s.chat.lock().await = None;
     tracing::warn!("gateway closed remotely — all sessions terminated, keys zeroized");
     (
         StatusCode::OK,
@@ -265,17 +290,8 @@ async fn vault_status_handler(State(s): State<Arc<AppState>>) -> Json<VaultStatu
     Json(VaultStatusResponse { exists, size, state })
 }
 
-async fn ingest_handler(
-    State(s): State<Arc<AppState>>,
-    mut multipart: Multipart,
-) -> impl IntoResponse {
-    if let Err(r) = check_llm() {
-        return r;
-    }
-    let gw = gateway(&s);
-    if let Err(r) = check_gate(&gw) {
-        return r;
-    }
+/// multipart 提取 .md 文件（ingest / ingest_stream 共用）
+async fn parse_md_multipart(mut multipart: Multipart) -> Result<(String, Vec<u8>), Response> {
     let mut filename = None;
     let mut content = None;
     loop {
@@ -286,20 +302,40 @@ async fn ingest_handler(
                         match field.bytes().await {
                             Ok(b) => {
                                 filename = Some(name);
-                                content = Some(b);
+                                content = Some(b.to_vec());
                             }
-                            Err(e) => return err(StatusCode::BAD_REQUEST, e.to_string()),
+                            Err(e) => return Err(err(StatusCode::BAD_REQUEST, e.to_string())),
                         }
                     }
                 }
             }
             Ok(None) => break,
-            Err(e) => return err(StatusCode::BAD_REQUEST, e.to_string()),
+            Err(e) => return Err(err(StatusCode::BAD_REQUEST, e.to_string())),
         }
     }
-    let (filename, content) = match (filename, content) {
-        (Some(f), Some(c)) => (f, c),
-        _ => return err(StatusCode::BAD_REQUEST, "请上传 .md 文件（multipart 字段带 filename）"),
+    match (filename, content) {
+        (Some(f), Some(c)) => Ok((f, c)),
+        _ => Err(err(
+            StatusCode::BAD_REQUEST,
+            "请上传 .md 文件（multipart 字段带 filename）",
+        )),
+    }
+}
+
+async fn ingest_handler(
+    State(s): State<Arc<AppState>>,
+    multipart: Multipart,
+) -> impl IntoResponse {
+    if let Err(r) = check_llm(&s) {
+        return r;
+    }
+    let gw = gateway(&s);
+    if let Err(r) = check_gate(&gw) {
+        return r;
+    }
+    let (filename, content) = match parse_md_multipart(multipart).await {
+        Ok(v) => v,
+        Err(r) => return r,
     };
 
     let _lock = s.vault_lock.lock().await;
@@ -324,10 +360,12 @@ async fn ingest_handler(
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
 
-    let agent = mw_agent::WikiAgent::new(&s.skills_root, &work);
-    let prompt = format!(
-        "将上传文件 {rel}（原始文件名 {filename}）入库到知识库，work_dir 即知识库根目录。规则：先检查根目录是否有 index.md——若无（全新知识库），先用 wiki-init 技能初始化 Wiki，然后用 wiki-ingest 技能入库该文件；若已有则直接 wiki-ingest。不要向用户提问确认，直接执行到底。完成后简述初始化与入库结果（建了哪些页面/类型）。"
+    let agent = mw_agent::WikiAgent::with_llm(
+        &s.skills_root,
+        &work,
+        s.llm.read().unwrap().clone(),
     );
+    let prompt = ingest_prompt(&rel, &filename);
     let answer = match agent.ask(&prompt).await {
         Ok(a) => a,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("Agent 入库失败：{e}")),
@@ -342,11 +380,18 @@ async fn ingest_handler(
     (StatusCode::OK, Json(serde_json::json!({"answer": answer, "files": files}))).into_response()
 }
 
+/// 入库 prompt（ingest / ingest_stream 共用）
+fn ingest_prompt(rel: &str, filename: &str) -> String {
+    format!(
+        "将上传文件 {rel}（原始文件名 {filename}）入库到知识库，work_dir 即知识库根目录。规则：先检查根目录是否有 index.md——若无（全新知识库），先用 wiki-init 技能初始化 Wiki，然后用 wiki-ingest 技能入库该文件；若已有则直接 wiki-ingest。不要向用户提问确认，直接执行到底。完成后简述初始化与入库结果（建了哪些页面/类型）。"
+    )
+}
+
 async fn query_handler(
     State(s): State<Arc<AppState>>,
     Json(req): Json<QueryRequest>,
 ) -> impl IntoResponse {
-    if let Err(r) = check_llm() {
+    if let Err(r) = check_llm(&s) {
         return r;
     }
     let gw = gateway(&s);
@@ -366,7 +411,11 @@ async fn query_handler(
     let work = session.work_dir().to_path_buf();
     let before = snapshot(&work);
 
-    let agent = mw_agent::WikiAgent::new(&s.skills_root, &work);
+    let agent = mw_agent::WikiAgent::with_llm(
+        &s.skills_root,
+        &work,
+        s.llm.read().unwrap().clone(),
+    );
     let prompt = format!("使用 wiki-query 技能回答问题：{}", req.question);
     let answer = match agent.ask(&prompt).await {
         Ok(a) => a,
@@ -439,6 +488,310 @@ async fn graph_handler(State(s): State<Arc<AppState>>) -> Response {
         Err(r) => return r,
     };
     Json(build_graph(&work)).into_response()
+}
+
+/* ============ LLM 设置 ============ */
+
+#[derive(Deserialize)]
+struct LlmConfigRequest {
+    provider: String,
+    base_url: String,
+    api_key: String,
+    model: String,
+}
+
+async fn get_llm_config_handler(State(s): State<Arc<AppState>>) -> Response {
+    let gw = gateway(&s);
+    if let Err(r) = check_gate(&gw) {
+        return r;
+    }
+    let llm = s.llm.read().unwrap().clone();
+    Json(serde_json::json!({
+        "provider": llm.provider,
+        "base_url": llm.base_url,
+        "model": llm.model,
+        "api_key_masked": llm.masked_key(),
+    }))
+    .into_response()
+}
+
+async fn post_llm_config_handler(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<LlmConfigRequest>,
+) -> Response {
+    let gw = gateway(&s);
+    if let Err(r) = check_gate(&gw) {
+        return r;
+    }
+    if req.provider != "openai_compat" && req.provider != "anthropic" {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "provider 仅支持 openai_compat 或 anthropic",
+        );
+    }
+    if req.base_url.trim().is_empty() || req.api_key.trim().is_empty() || req.model.trim().is_empty()
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "base_url / api_key / model 均不能为空",
+        );
+    }
+    let llm = mw_agent::LlmConfig {
+        provider: req.provider,
+        base_url: req.base_url.trim().to_string(),
+        api_key: req.api_key.trim().to_string(),
+        model: req.model.trim().to_string(),
+    };
+    if let Err(e) = llm.save(&s.config_path) {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("保存 appconfig.json 失败：{e}"),
+        );
+    }
+    *s.llm.write().unwrap() = llm;
+    // 模型变了：旧聊天会话作废，下轮用新配置重建
+    *s.chat.lock().await = None;
+    (StatusCode::OK, Json(serde_json::json!({"saved": true}))).into_response()
+}
+
+/* ============ SSE 基础设施 ============ */
+
+type SseItem = Result<SseEvent, std::convert::Infallible>;
+type SseTx = tokio::sync::mpsc::Sender<SseItem>;
+
+fn sse_channel() -> (SseTx, Sse<impl futures_util::Stream<Item = SseItem>>) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<SseItem>(64);
+    let stream = futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx));
+    (tx, Sse::new(stream))
+}
+
+async fn send_json(tx: &SseTx, v: serde_json::Value) {
+    let _ = tx.send(Ok(SseEvent::default().data(v.to_string()))).await;
+}
+
+/// AgentEvent → SSE JSON 映射：ToolCall→tool_call（detail 截 80 字符）、
+/// MessageUpdate→message、Error→error；Done 由收尾逻辑统一发（需附带 answer/files），其余跳过。
+fn agent_event_json(ev: &mw_agent::AgentEvent) -> Option<serde_json::Value> {
+    use mw_agent::AgentEvent as E;
+    match ev {
+        E::ToolCall { name, arguments } => Some(serde_json::json!({
+            "type": "tool_call",
+            "name": name,
+            "detail": arguments.chars().take(80).collect::<String>(),
+        })),
+        E::MessageUpdate(text) => Some(serde_json::json!({"type": "message", "text": text})),
+        E::Error(msg) => Some(serde_json::json!({"type": "error", "error": msg})),
+        _ => None,
+    }
+}
+
+/// 事件泵：并发驱动 agent future + 广播 receiver，事件实时写入 SSE 通道。
+/// 返回 (future 输出, 是否已转发过 error 事件)。
+async fn pump_events<F: std::future::Future>(
+    tx: &SseTx,
+    mut rx: tokio::sync::broadcast::Receiver<mw_agent::AgentEvent>,
+    fut: F,
+) -> (F::Output, bool) {
+    use tokio::sync::broadcast::error::RecvError;
+    tokio::pin!(fut);
+    let mut sent_error = false;
+    loop {
+        tokio::select! {
+            ev = rx.recv() => match ev {
+                Ok(ev) => {
+                    if matches!(ev, mw_agent::AgentEvent::Error(_)) {
+                        sent_error = true;
+                    }
+                    if let Some(j) = agent_event_json(&ev) {
+                        send_json(tx, j).await;
+                    }
+                }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => return (fut.await, sent_error),
+            },
+            out = &mut fut => {
+                // future 完成前排干残留事件（Done 前的 tool_call/message 等）
+                while let Ok(ev) = rx.try_recv() {
+                    if matches!(ev, mw_agent::AgentEvent::Error(_)) {
+                        sent_error = true;
+                    }
+                    if let Some(j) = agent_event_json(&ev) {
+                        send_json(tx, j).await;
+                    }
+                }
+                return (out, sent_error);
+            }
+        }
+    }
+}
+
+/* ============ 流式入库 / 聊天 ============ */
+
+async fn ingest_stream_handler(State(s): State<Arc<AppState>>, multipart: Multipart) -> Response {
+    if let Err(r) = check_llm(&s) {
+        return r;
+    }
+    let gw = gateway(&s);
+    if let Err(r) = check_gate(&gw) {
+        return r;
+    }
+    let (filename, content) = match parse_md_multipart(multipart).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+
+    let (tx, sse) = sse_channel();
+    tokio::spawn(async move {
+        let _lock = s.vault_lock.lock().await;
+        let guard = match ensure_session(&s).await {
+            Ok(g) => g,
+            Err(_) => {
+                send_json(&tx, serde_json::json!({"type": "error", "error": "打开解密会话失败"}))
+                    .await;
+                return;
+            }
+        };
+        let session = guard.as_ref().unwrap();
+        let work = session.work_dir().to_path_buf();
+        let before = snapshot(&work);
+
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let rel = format!("inbox/upload-{ts}.md");
+        let dst = work.join(&rel);
+        if let Some(p) = dst.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
+        if let Err(e) = std::fs::write(&dst, &content) {
+            send_json(&tx, serde_json::json!({"type": "error", "error": e.to_string()})).await;
+            return;
+        }
+
+        let agent = mw_agent::WikiAgent::with_llm(
+            &s.skills_root,
+            &work,
+            s.llm.read().unwrap().clone(),
+        );
+        let (rx, handle) = agent.ask_with_events(&ingest_prompt(&rel, &filename));
+        let (out, sent_error) = pump_events(&tx, rx, handle).await;
+        let answer = match out {
+            Ok(Ok(text)) => text,
+            Ok(Err(e)) => {
+                if !sent_error {
+                    send_json(&tx, serde_json::json!({"type": "error", "error": e})).await;
+                }
+                return;
+            }
+            Err(e) => {
+                if !sent_error {
+                    send_json(&tx, serde_json::json!({"type": "error", "error": e.to_string()}))
+                        .await;
+                }
+                return;
+            }
+        };
+
+        let after = snapshot(&work);
+        let files: Vec<String> = diff_snapshots(&before, &after);
+        // 即时 seal 更新容器，长驻会话保持存活
+        if let Err(e) = s.vault.seal_session(&gw, session) {
+            send_json(
+                &tx,
+                serde_json::json!({"type": "error", "error": format!("封印失败：{e}")}),
+            )
+            .await;
+            return;
+        }
+        send_json(
+            &tx,
+            serde_json::json!({"type": "done", "answer": answer, "files": files}),
+        )
+        .await;
+    });
+    sse.into_response()
+}
+
+#[derive(Deserialize)]
+struct ChatRequest {
+    message: String,
+}
+
+async fn chat_handler(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<ChatRequest>,
+) -> Response {
+    if let Err(r) = check_llm(&s) {
+        return r;
+    }
+    let gw = gateway(&s);
+    if let Err(r) = check_gate(&gw) {
+        return r;
+    }
+    if req.message.trim().is_empty() {
+        return err(StatusCode::BAD_REQUEST, "message 不能为空");
+    }
+
+    let (tx, sse) = sse_channel();
+    tokio::spawn(async move {
+        let mut guard = s.chat.lock().await;
+        if guard.is_none() {
+            // 懒建：绑定当前解密会话的 work_dir
+            let sess_guard = match ensure_session(&s).await {
+                Ok(g) => g,
+                Err(_) => {
+                    send_json(
+                        &tx,
+                        serde_json::json!({"type": "error", "error": "打开解密会话失败"}),
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let work = sess_guard.as_ref().unwrap().work_dir().to_path_buf();
+            drop(sess_guard);
+            let agent = mw_agent::WikiAgent::with_llm(
+                &s.skills_root,
+                &work,
+                s.llm.read().unwrap().clone(),
+            );
+            let created = agent
+                .build_chat_config()
+                .map_err(|e| e.to_string())
+                .and_then(mw_agent::ChatSession::new);
+            match created {
+                Ok(cs) => *guard = Some(cs),
+                Err(e) => {
+                    send_json(&tx, serde_json::json!({"type": "error", "error": e})).await;
+                    return;
+                }
+            }
+        }
+        let session = guard.as_mut().unwrap();
+        let rx = session.subscribe();
+        let (out, sent_error) = pump_events(&tx, rx, session.send(&req.message)).await;
+        match out {
+            Ok(text) => {
+                send_json(&tx, serde_json::json!({"type": "done", "answer": text})).await;
+            }
+            Err(e) => {
+                if !sent_error {
+                    send_json(&tx, serde_json::json!({"type": "error", "error": e})).await;
+                }
+            }
+        }
+    });
+    sse.into_response()
+}
+
+async fn chat_reset_handler(State(s): State<Arc<AppState>>) -> Response {
+    let gw = gateway(&s);
+    if let Err(r) = check_gate(&gw) {
+        return r;
+    }
+    *s.chat.lock().await = None;
+    (StatusCode::OK, Json(serde_json::json!({"reset": true}))).into_response()
 }
 
 /// 文件树节点：{name, path, type, children}；排除 .git/.gitkeep；目录排序在前
@@ -666,6 +1019,8 @@ pub fn load_state(vault: Vault, skills_root: PathBuf) -> Result<Arc<AppState>> {
     } else {
         (KeyGateway::new()?, String::new())
     };
+    let config_path = vault.root.join("appconfig.json");
+    let llm = mw_agent::LlmConfig::load_or_env(&config_path);
     Ok(Arc::new(AppState {
         vault,
         gateway: RwLock::new(Arc::new(gateway)),
@@ -673,6 +1028,9 @@ pub fn load_state(vault: Vault, skills_root: PathBuf) -> Result<Arc<AppState>> {
         skills_root,
         vault_lock: Arc::new(tokio::sync::Mutex::new(())),
         current_session: tokio::sync::RwLock::new(None),
+        llm: RwLock::new(llm),
+        config_path,
+        chat: tokio::sync::Mutex::new(None),
     }))
 }
 
@@ -717,6 +1075,236 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(serve(listener, state));
         format!("http://{addr}")
+    }
+
+    /// 预写 appconfig.json（假 key + 秒失败的 base_url），init vault 并起服务
+    async fn spawn_unlocked_with_fake_llm(
+        tmp: &tempfile::TempDir,
+    ) -> (Arc<AppState>, String, reqwest::Client) {
+        std::fs::write(
+            tmp.path().join("appconfig.json"),
+            serde_json::json!({
+                "llm": {
+                    "provider": "openai_compat",
+                    "base_url": "http://127.0.0.1:1",
+                    "api_key": "sk-dummy-9999",
+                    "model": "test-model"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let vault = Vault::open(tmp.path()).unwrap();
+        let gw = KeyGateway::new().unwrap();
+        vault.init(&gw, "pw-A").unwrap();
+        gw.close();
+        let state = load_state(vault, tmp.path().to_path_buf()).unwrap();
+        let base = spawn_server(state.clone()).await;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{base}/api/gateway/open"))
+            .json(&serde_json::json!({"password": "pw-A"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        (state, base, client)
+    }
+
+    #[tokio::test]
+    async fn llm_config_endpoint_gated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = Vault::open(tmp.path()).unwrap();
+        let gw = KeyGateway::new().unwrap();
+        vault.init(&gw, "pw-A").unwrap();
+        gw.close();
+        let state = load_state(vault, tmp.path().to_path_buf()).unwrap();
+        let base = spawn_server(state.clone()).await;
+        let client = reqwest::Client::new();
+
+        // 未解锁 → 423
+        let resp = client
+            .get(format!("{base}/api/llm/config"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::LOCKED);
+        let resp = client
+            .post(format!("{base}/api/llm/config"))
+            .json(&serde_json::json!({
+                "provider": "openai_compat", "base_url": "https://x", "api_key": "k", "model": "m"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::LOCKED);
+
+        // 解锁
+        let resp = client
+            .post(format!("{base}/api/gateway/open"))
+            .json(&serde_json::json!({"password": "pw-A"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 字段校验：空 key → 400；非法 provider → 400
+        let resp = client
+            .post(format!("{base}/api/llm/config"))
+            .json(&serde_json::json!({
+                "provider": "openai_compat", "base_url": "https://x", "api_key": "", "model": "m"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let resp = client
+            .post(format!("{base}/api/llm/config"))
+            .json(&serde_json::json!({
+                "provider": "bogus", "base_url": "https://x", "api_key": "k", "model": "m"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // 正常保存 → 200 + appconfig.json 落盘（600）+ 热更新
+        let resp = client
+            .post(format!("{base}/api/llm/config"))
+            .json(&serde_json::json!({
+                "provider": "openai_compat",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "sk-or-abcd1234",
+                "model": "deepseek/deepseek-v4-flash"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(tmp.path().join("appconfig.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        assert_eq!(state.llm.read().unwrap().api_key, "sk-or-abcd1234");
+
+        // GET → masked key（不含完整 key，含尾 4 位）
+        let resp = client
+            .get(format!("{base}/api/llm/config"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["provider"], "openai_compat");
+        assert_eq!(body["base_url"], "https://openrouter.ai/api/v1");
+        assert_eq!(body["model"], "deepseek/deepseek-v4-flash");
+        let masked = body["api_key_masked"].as_str().unwrap();
+        assert!(!masked.contains("abcd"));
+        assert!(masked.ends_with("1234"));
+        assert!(body.get("api_key").is_none());
+    }
+
+    #[tokio::test]
+    async fn ingest_stream_endpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_state, base, client) = spawn_unlocked_with_fake_llm(&tmp).await;
+
+        // multipart 手动构造（假 key + 不可达 base_url → agent 必失败 → error 事件收尾）
+        let boundary = "MWTESTBOUNDARY";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.md\"\r\nContent-Type: text/markdown\r\n\r\n# 测试\n\n[[页面甲]]\n\r\n--{boundary}--\r\n"
+        );
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            client
+                .post(format!("{base}/api/ingest/stream"))
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(body)
+                .send(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers()["content-type"].to_str().unwrap().to_string();
+        assert!(ct.contains("text/event-stream"), "content-type: {ct}");
+        let text = tokio::time::timeout(std::time::Duration::from_secs(120), resp.text())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(text.contains("data: "), "body: {text}");
+        assert!(
+            text.contains("\"type\":\"done\"") || text.contains("\"type\":\"error\""),
+            "body: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_requires_unlock() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("appconfig.json"),
+            serde_json::json!({
+                "llm": {"provider": "openai_compat", "base_url": "http://127.0.0.1:1",
+                        "api_key": "sk-dummy-9999", "model": "test-model"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let vault = Vault::open(tmp.path()).unwrap();
+        let gw = KeyGateway::new().unwrap();
+        vault.init(&gw, "pw-A").unwrap();
+        gw.close();
+        let state = load_state(vault, tmp.path().to_path_buf()).unwrap();
+        let base = spawn_server(state).await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("{base}/api/chat"))
+            .json(&serde_json::json!({"message": "你好"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::LOCKED);
+        let resp = client
+            .post(format!("{base}/api/chat/reset"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::LOCKED);
+    }
+
+    #[tokio::test]
+    async fn chat_reset_clears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, base, client) = spawn_unlocked_with_fake_llm(&tmp).await;
+
+        // 塞一个真实聊天会话进去（离线构造：不发起任何网络请求）
+        let agent = mw_agent::WikiAgent::with_llm(
+            tmp.path(),
+            tmp.path(),
+            state.llm.read().unwrap().clone(),
+        );
+        let cfg = agent.build_chat_config().unwrap();
+        *state.chat.lock().await = Some(mw_agent::ChatSession::new(cfg).unwrap());
+        assert!(state.chat.lock().await.is_some());
+
+        let resp = client
+            .post(format!("{base}/api/chat/reset"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.chat.lock().await.is_none());
     }
 
     #[tokio::test]

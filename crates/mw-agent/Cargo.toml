@@ -8,6 +8,7 @@ license.workspace = true
 mw-wiki = { path = "../mw-wiki" }
 r2-core = { workspace = true }
 anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

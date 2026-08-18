@@ -12,80 +12,116 @@
   }
   .accent { color: #d92027; }
   header {
-    border-bottom: 3px solid #d92027; padding: 20px 32px;
+    border-bottom: 3px solid #d92027; padding: 14px 32px;
     display: flex; align-items: baseline; gap: 16px;
   }
   header h1 { font-size: 24px; letter-spacing: 1px; }
   header .tag { font-size: 12px; color: #666; }
-  main { max-width: 1200px; margin: 0 auto; padding: 24px 32px 64px; }
+  header .spacer { flex: 1; }
+  main { max-width: 1400px; margin: 0 auto; padding: 18px 32px 32px; }
   .statusbar {
     display: flex; align-items: center; gap: 10px;
     border: 1px solid #ddd; border-left: 6px solid #d92027;
-    padding: 12px 16px; margin-bottom: 24px; font-size: 14px;
+    padding: 10px 16px; margin-bottom: 16px; font-size: 14px;
   }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: #999; }
   .dot.open { background: #d92027; }
   .card {
-    border: 1px solid #ddd; padding: 20px; margin-bottom: 20px;
+    border: 1px solid #ddd; padding: 14px; margin-bottom: 14px;
   }
-  .card h2 { font-size: 15px; margin-bottom: 12px; }
+  .card h2 { font-size: 14px; margin-bottom: 10px; }
   .card h2::before { content: "■ "; color: #d92027; font-size: 10px; vertical-align: 2px; }
-  input[type=password], input[type=text], input[type=file] {
-    width: 100%; padding: 10px; border: 1px solid #bbb; font-size: 14px;
-    margin-bottom: 10px; background: #fff; color: #111;
+  input[type=password], input[type=text], input[type=file], select {
+    width: 100%; padding: 8px; border: 1px solid #bbb; font-size: 13px;
+    margin-bottom: 8px; background: #fff; color: #111;
   }
-  input:focus { outline: 2px solid #d92027; outline-offset: -1px; }
+  input:focus, select:focus { outline: 2px solid #d92027; outline-offset: -1px; }
   button {
-    background: #111; color: #fff; border: none; padding: 10px 22px;
-    font-size: 14px; cursor: pointer;
+    background: #111; color: #fff; border: none; padding: 8px 18px;
+    font-size: 13px; cursor: pointer;
   }
   button:hover { background: #d92027; }
   button:disabled { background: #999; cursor: not-allowed; }
+  button.ghost { background: #fff; color: #111; border: 1px solid #bbb; }
+  button.ghost:hover { color: #d92027; border-color: #d92027; }
   button.lock {
     background: #d92027; font-weight: bold; width: 100%;
-    padding: 14px; font-size: 16px; letter-spacing: 2px;
+    padding: 12px; font-size: 15px; letter-spacing: 2px;
   }
   button.lock:hover { background: #a8151b; }
-  .answer {
-    border: 1px solid #ddd; border-top: 3px solid #d92027;
-    padding: 16px; margin-top: 12px; white-space: pre-wrap;
-    font-size: 14px; line-height: 1.7; min-height: 60px; background: #fafafa;
-  }
-  .msg { font-size: 13px; margin-top: 8px; min-height: 18px; }
+  .msg { font-size: 12px; margin-top: 6px; min-height: 16px; }
   .msg.error { color: #d92027; }
   .msg.ok { color: #111; }
-  .hidden { display: none; }
-  .spinner {
-    display: inline-block; width: 16px; height: 16px;
-    border: 2px solid #ddd; border-top-color: #d92027; border-radius: 50%;
-    animation: spin .8s linear infinite; vertical-align: -3px; margin-right: 8px;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  #overlay {
-    position: fixed; inset: 0; background: rgba(255,255,255,.85);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 15px; z-index: 10;
-  }
+  .hidden { display: none !important; }
   .files { font-size: 12px; color: #666; margin-top: 8px; }
+  .files a { color: #3B82F6; cursor: pointer; text-decoration: none; display: block; line-height: 1.8; }
+  .files a:hover { text-decoration: underline; }
 
-  /* Wiki 浏览器 */
-  .tabs { display: flex; gap: 0; border-bottom: 2px solid #111; margin-bottom: 0; }
+  /* 主布局：侧栏 + 聊天 */
+  .layout { display: flex; gap: 16px; align-items: flex-start; }
+  #sidebar { width: 360px; min-width: 360px; }
+  #chat { flex: 1; min-width: 0; }
+
+  /* 聊天 */
+  #chat-list {
+    border: 1px solid #ddd; padding: 16px; min-height: 420px; max-height: 62vh;
+    overflow-y: auto; background: #fafafa;
+  }
+  .bubble-row { display: flex; margin-bottom: 12px; }
+  .bubble-row.user { justify-content: flex-end; }
+  .bubble {
+    max-width: 78%; padding: 10px 14px; font-size: 14px; line-height: 1.7;
+    border: 1px solid #ddd; background: #fff; word-wrap: break-word;
+  }
+  .bubble-row.user .bubble {
+    background: #111; color: #fff; border-color: #111; white-space: pre-wrap;
+  }
+  .bubble .status { font-size: 12px; color: #999; margin-bottom: 6px; line-height: 1.6; }
+  .bubble .status div::before { content: "⚙ "; color: #d92027; }
+  .bubble .err { color: #d92027; font-size: 13px; }
+  .chat-input { display: flex; gap: 8px; margin-top: 10px; }
+  .chat-input input { flex: 1; margin-bottom: 0; }
+  .chat-input button { white-space: nowrap; }
+
+  /* markdown 渲染（聊天气泡 + 预览共用） */
+  .md h1, .md h2, .md h3, .md h4 { margin: 12px 0 6px; }
+  .md h1 { font-size: 20px; border-bottom: 2px solid #d92027; padding-bottom: 5px; }
+  .md h2 { font-size: 17px; }
+  .md h3 { font-size: 15px; }
+  .md p { margin: 6px 0; }
+  .md ul { padding-left: 20px; margin: 6px 0; }
+  .md blockquote {
+    border-left: 3px solid #d92027; padding: 3px 10px; margin: 6px 0;
+    color: #555; background: #fafafa;
+  }
+  .md code { background: #f2f2f2; padding: 1px 5px; font-size: 13px; }
+  .md pre { background: #f7f7f7; border: 1px solid #e5e5e5; padding: 10px; overflow: auto; margin: 6px 0; }
+  .md pre code { background: none; padding: 0; }
+  .md a.wl { color: #3B82F6; text-decoration: none; border-bottom: 1px dashed #3B82F6; cursor: pointer; }
+
+  /* 入库进度 */
+  #ingest-progress {
+    font-size: 12px; color: #999; max-height: 140px; overflow-y: auto;
+    margin-top: 8px; line-height: 1.7;
+  }
+  #ingest-progress div::before { content: "⚙ "; color: #d92027; }
+  #ingest-progress div.err { color: #d92027; }
+  #ingest-progress div.err::before { content: "✕ "; }
+
+  /* 文件树 / 图谱 */
+  .tabs { display: flex; gap: 0; border-bottom: 2px solid #111; }
   .tabs button {
     background: #fff; color: #111; border: 1px solid #ddd; border-bottom: none;
-    padding: 8px 20px; font-size: 14px; margin-right: 4px;
+    padding: 6px 14px; font-size: 13px; margin-right: 4px;
   }
   .tabs button.active { background: #111; color: #fff; }
-  .browser { display: flex; border: 1px solid #ddd; border-top: none; min-height: 560px; }
-  .pane-left {
-    width: 340px; min-width: 340px; border-right: 1px solid #ddd;
-    padding: 12px; overflow: auto; position: relative;
+  .browser {
+    border: 1px solid #ddd; border-top: none; min-height: 300px;
+    max-height: 380px; overflow: auto; padding: 10px; position: relative;
   }
-  .pane-left.wide { width: 640px; }
-  .pane-right { flex: 1; padding: 20px 28px; overflow: auto; }
-  #page-view:empty::before { content: "点击左侧文件树或图谱节点查看页面"; color: #999; font-size: 13px; }
-  .tree ul { list-style: none; padding-left: 16px; }
+  .tree ul { list-style: none; padding-left: 14px; }
   .tree > ul { padding-left: 0; }
-  .tree li { font-size: 13px; line-height: 1.9; }
+  .tree li { font-size: 12px; line-height: 1.9; }
   .tree .dir > .row { cursor: pointer; font-weight: 600; }
   .tree .dir > .row::before { content: "▾ "; color: #d92027; }
   .tree .dir.closed > .row::before { content: "▸ "; color: #d92027; }
@@ -93,35 +129,31 @@
   .tree .file > .row { cursor: pointer; }
   .tree .file > .row::before { content: "· "; color: #999; }
   .tree .row:hover { color: #d92027; }
-  #graph-wrap { position: relative; }
   #graph-canvas { display: block; cursor: grab; }
-  #graph-legend {
-    position: absolute; left: 10px; bottom: 10px; font-size: 11px;
-    background: rgba(255,255,255,.9); border: 1px solid #ddd; padding: 8px 10px;
-    line-height: 1.8; pointer-events: none;
+
+  /* 预览弹层 */
+  #preview {
+    position: fixed; inset: 0; background: rgba(0,0,0,.35);
+    display: flex; align-items: center; justify-content: center; z-index: 20;
   }
-  #graph-legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
-  #page-view { font-size: 14px; line-height: 1.8; }
-  #page-view h1, #page-view h2, #page-view h3, #page-view h4 { margin: 14px 0 8px; }
-  #page-view h1 { font-size: 22px; border-bottom: 2px solid #d92027; padding-bottom: 6px; }
-  #page-view h2 { font-size: 18px; }
-  #page-view h3 { font-size: 15px; }
-  #page-view p { margin: 8px 0; }
-  #page-view ul { padding-left: 22px; margin: 8px 0; }
-  #page-view blockquote {
-    border-left: 3px solid #d92027; padding: 4px 12px; margin: 8px 0;
-    color: #555; background: #fafafa;
+  #preview-box {
+    background: #fff; width: min(860px, 92vw); max-height: 84vh; overflow-y: auto;
+    border-top: 4px solid #d92027; padding: 22px 28px; font-size: 14px; line-height: 1.8;
+    position: relative;
   }
-  #page-view code { background: #f2f2f2; padding: 1px 5px; font-size: 13px; }
-  #page-view pre { background: #f7f7f7; border: 1px solid #e5e5e5; padding: 12px; overflow: auto; margin: 8px 0; }
-  #page-view pre code { background: none; padding: 0; }
-  #page-view a.wl { color: #3B82F6; text-decoration: none; border-bottom: 1px dashed #3B82F6; cursor: pointer; }
+  #preview-close {
+    position: absolute; top: 10px; right: 12px; background: #fff; color: #111;
+    border: 1px solid #bbb; padding: 4px 12px;
+  }
+  #preview-path { font-size: 12px; color: #999; margin-bottom: 10px; }
 </style>
 </head>
 <body>
 <header>
   <h1>Mind <span class="accent">Wiki</span></h1>
   <span class="tag">企业级安全 AI 知识库</span>
+  <span class="spacer"></span>
+  <button class="ghost hidden" id="btn-collapse" onclick="toggleSidebar()">☰ 侧栏</button>
 </header>
 <main>
   <div class="statusbar">
@@ -138,56 +170,76 @@
 
   <div class="card hidden" id="card-unlock">
     <h2>解锁知识库</h2>
-    <input type="password" id="open-password" placeholder="主密码">
+    <input type="password" id="open-password" placeholder="主密码"
+           onkeydown="if(event.key==='Enter')doOpen()">
     <button onclick="doOpen()">解锁</button>
     <div class="msg" id="open-msg"></div>
   </div>
 
   <div id="section-open" class="hidden">
-    <div class="card">
-      <h2>上传 Markdown 入库</h2>
-      <input type="file" id="ingest-file" accept=".md">
-      <button onclick="doIngest()">入库</button>
-      <div class="msg" id="ingest-msg"></div>
-      <div class="files" id="ingest-files"></div>
-    </div>
+    <div class="layout">
+      <aside id="sidebar">
+        <div class="card">
+          <h2>上传 Markdown 入库</h2>
+          <input type="file" id="ingest-file" accept=".md">
+          <button id="btn-ingest" onclick="doIngest()">入库</button>
+          <div class="msg" id="ingest-msg"></div>
+          <div id="ingest-progress"></div>
+          <div class="files" id="ingest-files"></div>
+        </div>
 
-    <div class="card">
-      <h2>查询</h2>
-      <input type="text" id="query-input" placeholder="向知识库提问…"
-             onkeydown="if(event.key==='Enter')doQuery()">
-      <button onclick="doQuery()">提问</button>
-      <div class="answer hidden" id="answer"></div>
-      <div class="msg" id="query-msg"></div>
-    </div>
-
-    <div class="card">
-      <h2>Wiki 浏览器</h2>
-      <div class="tabs">
-        <button id="tab-tree" class="active" onclick="switchTab('tree')">文件树</button>
-        <button id="tab-graph" onclick="switchTab('graph')">图谱</button>
-      </div>
-      <div class="browser">
-        <div class="pane-left" id="pane-left">
-          <div id="tree-view" class="tree"></div>
-          <div id="graph-wrap" class="hidden">
-            <canvas id="graph-canvas"></canvas>
-            <div id="graph-legend"></div>
+        <div class="card">
+          <h2>Wiki 浏览</h2>
+          <div class="tabs">
+            <button id="tab-tree" class="active" onclick="switchTab('tree')">文件树</button>
+            <button id="tab-graph" onclick="switchTab('graph')">图谱</button>
+          </div>
+          <div class="browser">
+            <div id="tree-view" class="tree"></div>
+            <div id="graph-wrap" class="hidden">
+              <canvas id="graph-canvas"></canvas>
+            </div>
           </div>
         </div>
-        <div class="pane-right" id="page-view"></div>
-      </div>
-    </div>
 
-    <div class="card">
-      <button class="lock" onclick="doLock()">🔒 一键锁定</button>
-      <div class="msg" id="lock-msg"></div>
+        <div class="card">
+          <h2>模型设置 ⚙️</h2>
+          <select id="llm-provider">
+            <option value="openai_compat">openai_compat</option>
+            <option value="anthropic">anthropic</option>
+          </select>
+          <button class="ghost" onclick="presetOpenRouter()">OpenRouter 预设</button>
+          <div style="height:8px"></div>
+          <input type="text" id="llm-base-url" placeholder="base_url，如 https://openrouter.ai/api/v1">
+          <input type="password" id="llm-api-key" placeholder="api_key">
+          <input type="text" id="llm-model" placeholder="model，如 deepseek/deepseek-v4-flash">
+          <button onclick="saveSettings()">保存</button>
+          <div class="msg" id="llm-msg"></div>
+        </div>
+
+        <button class="lock" onclick="doLock()">🔒 一键锁定</button>
+        <div class="msg" id="lock-msg"></div>
+      </aside>
+
+      <section id="chat">
+        <div id="chat-list"></div>
+        <div class="chat-input">
+          <input type="text" id="chat-input" placeholder="向知识库提问…"
+                 onkeydown="if(event.key==='Enter')sendChat()">
+          <button id="btn-send" onclick="sendChat()">发送</button>
+          <button class="ghost" onclick="newChat()">新对话</button>
+        </div>
+      </section>
     </div>
   </div>
 </main>
 
-<div id="overlay" class="hidden">
-  <div><span class="spinner"></span><span id="overlay-text">Agent 工作中…</span></div>
+<div id="preview" class="hidden" onclick="if(event.target===this)closePreview()">
+  <div id="preview-box">
+    <button id="preview-close" onclick="closePreview()">关闭 ✕</button>
+    <div id="preview-path"></div>
+    <div id="preview-content" class="md"></div>
+  </div>
 </div>
 
 <script>
@@ -201,13 +253,8 @@ function showMsg(id, text, isError) {
 
 function friendly(status, body) {
   if (status === 423) return "知识库已锁定，请先解锁";
-  if (status === 503) return (body && body.error) || "未配置 LLM（MW_LLM_API_KEY）";
+  if (status === 503) return (body && body.error) || "未配置 LLM：请在设置页填写模型配置";
   return (body && body.error) || ("请求失败：HTTP " + status);
-}
-
-function busy(on, text) {
-  $("overlay").classList.toggle("hidden", !on);
-  if (text) $("overlay-text").textContent = text;
 }
 
 let wasOpen = false;
@@ -224,6 +271,7 @@ async function refresh() {
     $("card-init").classList.toggle("hidden", st.exists);
     $("card-unlock").classList.toggle("hidden", !st.exists || open);
     $("section-open").classList.toggle("hidden", !open);
+    $("btn-collapse").classList.toggle("hidden", !open);
     if (open && !wasOpen) onUnlocked();
     if (!open && wasOpen) onLocked();
     wasOpen = open;
@@ -232,14 +280,21 @@ async function refresh() {
   }
 }
 
-function onUnlocked() { loadTree(); graphDirty = true; }
+function onUnlocked() { loadTree(); graphDirty = true; loadSettings(); }
 function onLocked() {
   $("tree-view").innerHTML = "";
-  $("page-view").innerHTML = "";
+  $("chat-list").innerHTML = "";
+  $("ingest-progress").innerHTML = "";
+  $("ingest-files").innerHTML = "";
+  closePreview();
   G.nodes = []; G.edges = []; G.raw = null; graphDirty = true;
   cancelAnimationFrame(G.raf);
   const ctx = $("graph-canvas").getContext("2d");
   ctx && ctx.clearRect(0, 0, 9999, 9999);
+}
+
+function toggleSidebar() {
+  $("sidebar").classList.toggle("hidden");
 }
 
 async function doInit() {
@@ -274,54 +329,6 @@ async function doOpen() {
   }
 }
 
-async function doIngest() {
-  const file = $("ingest-file").files[0];
-  if (!file) return showMsg("ingest-msg", "请选择 .md 文件", true);
-  const fd = new FormData();
-  fd.append("file", file);
-  busy(true, "Agent 入库中…");
-  try {
-    const resp = await fetch("/api/ingest", {method: "POST", body: fd});
-    const body = await resp.json().catch(() => null);
-    if (resp.ok) {
-      showMsg("ingest-msg", "入库完成", false);
-      $("ingest-files").textContent =
-        body.files && body.files.length ? "变更文件：" + body.files.join(", ") : "";
-      $("ingest-file").value = "";
-      loadTree(); graphDirty = true;
-    } else {
-      showMsg("ingest-msg", friendly(resp.status, body), true);
-    }
-  } finally {
-    busy(false);
-    refresh();
-  }
-}
-
-async function doQuery() {
-  const question = $("query-input").value.trim();
-  if (!question) return showMsg("query-msg", "请输入问题", true);
-  busy(true, "Agent 查询中…");
-  try {
-    const resp = await fetch("/api/query", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({question})
-    });
-    const body = await resp.json().catch(() => null);
-    if (resp.ok) {
-      $("answer").textContent = body.answer || "";
-      $("answer").classList.remove("hidden");
-      showMsg("query-msg", body.sealed ? "（答案已沉淀入库）" : "", false);
-      if (body.sealed) { loadTree(); graphDirty = true; }
-    } else {
-      showMsg("query-msg", friendly(resp.status, body), true);
-    }
-  } finally {
-    busy(false);
-    refresh();
-  }
-}
-
 async function doLock() {
   let token = sessionStorage.getItem("mw_admin_token");
   if (!token) {
@@ -342,6 +349,225 @@ async function doLock() {
   }
 }
 
+/* ============ SSE 读取（fetch POST + ReadableStream 手动解析 data: 行） ============ */
+async function readSSE(resp, onEvent) {
+  const ct = resp.headers.get("content-type") || "";
+  if (!resp.ok || !ct.includes("text/event-stream")) {
+    const body = await resp.json().catch(() => null);
+    onEvent({type: "error", error: friendly(resp.status, body)});
+    return;
+  }
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, {stream: true});
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const chunk = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      for (const line of chunk.split("\n")) {
+        if (line.startsWith("data: ")) {
+          try { onEvent(JSON.parse(line.slice(6))); } catch (e) {}
+        }
+      }
+    }
+  }
+}
+
+/* ============ 聊天 ============ */
+let chatBusy = false;
+
+function setChatBusy(on) {
+  chatBusy = on;
+  $("btn-send").disabled = on;
+  $("chat-input").disabled = on;
+}
+
+function addBubble(role) {
+  const row = document.createElement("div");
+  row.className = "bubble-row " + role;
+  const bubble = document.createElement("div");
+  bubble.className = "bubble md";
+  row.appendChild(bubble);
+  $("chat-list").appendChild(row);
+  $("chat-list").scrollTop = $("chat-list").scrollHeight;
+  return bubble;
+}
+
+function bindWikilinks(el) {
+  el.querySelectorAll("a.wl").forEach(a => {
+    a.onclick = e => { e.preventDefault(); openByStem(a.dataset.target); };
+  });
+}
+
+async function sendChat() {
+  const input = $("chat-input");
+  const message = input.value.trim();
+  if (!message || chatBusy) return;
+  input.value = "";
+  addBubble("user").textContent = message;
+  const bubble = addBubble("agent");
+  const status = document.createElement("div");
+  status.className = "status";
+  bubble.appendChild(status);
+  const content = document.createElement("div");
+  bubble.appendChild(content);
+  const recent = [];
+  let text = "";
+  let finished = false;
+
+  setChatBusy(true);
+  try {
+    const resp = await fetch("/api/chat", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({message})
+    });
+    await readSSE(resp, ev => {
+      if (ev.type === "tool_call") {
+        recent.push((ev.name || "tool") + " " + (ev.detail || ""));
+        status.innerHTML = recent.slice(-3).map(escHtml).map(s => `<div>${s}</div>`).join("");
+      } else if (ev.type === "message") {
+        text += ev.text || "";
+        content.innerHTML = renderMd(text);
+        bindWikilinks(content);
+      } else if (ev.type === "done") {
+        finished = true;
+        if (!text && ev.answer) {
+          content.innerHTML = renderMd(ev.answer);
+          bindWikilinks(content);
+        }
+      } else if (ev.type === "error") {
+        finished = true;
+        const d = document.createElement("div");
+        d.className = "err";
+        d.textContent = ev.error || "未知错误";
+        bubble.appendChild(d);
+      }
+      $("chat-list").scrollTop = $("chat-list").scrollHeight;
+    });
+  } catch (e) {
+    const d = document.createElement("div");
+    d.className = "err";
+    d.textContent = "网络错误：" + e;
+    bubble.appendChild(d);
+  } finally {
+    status.remove();
+    if (!finished && !text) {
+      const d = document.createElement("div");
+      d.className = "err";
+      d.textContent = "连接中断";
+      bubble.appendChild(d);
+    }
+    setChatBusy(false);
+    input.focus();
+  }
+}
+
+async function newChat() {
+  await fetch("/api/chat/reset", {method: "POST"});
+  $("chat-list").innerHTML = "";
+}
+
+/* ============ 流式入库 ============ */
+async function doIngest() {
+  const file = $("ingest-file").files[0];
+  if (!file) return showMsg("ingest-msg", "请选择 .md 文件", true);
+  const fd = new FormData();
+  fd.append("file", file);
+  $("btn-ingest").disabled = true;
+  $("ingest-progress").innerHTML = "";
+  $("ingest-files").innerHTML = "";
+  showMsg("ingest-msg", "入库中…", false);
+  const prog = $("ingest-progress");
+  const addLine = (t, isErr) => {
+    const d = document.createElement("div");
+    if (isErr) d.className = "err";
+    d.textContent = t;
+    prog.appendChild(d);
+    prog.scrollTop = prog.scrollHeight;
+  };
+  try {
+    const resp = await fetch("/api/ingest/stream", {method: "POST", body: fd});
+    let ok = false;
+    await readSSE(resp, ev => {
+      if (ev.type === "tool_call") {
+        addLine((ev.name || "tool") + " " + (ev.detail || ""));
+      } else if (ev.type === "done") {
+        ok = true;
+        showMsg("ingest-msg", "入库完成", false);
+        const files = ev.files || [];
+        if (files.length) {
+          $("ingest-files").innerHTML = "变更文件（点击预览）：";
+          for (const f of files) {
+            const a = document.createElement("a");
+            a.textContent = f;
+            a.onclick = () => openPage(f);
+            $("ingest-files").appendChild(a);
+          }
+        }
+      } else if (ev.type === "error") {
+        addLine(ev.error || "未知错误", true);
+        showMsg("ingest-msg", ev.error || "入库失败", true);
+      }
+    });
+    if (!ok && !$("ingest-msg").classList.contains("error")) {
+      showMsg("ingest-msg", "连接中断", true);
+    }
+  } catch (e) {
+    showMsg("ingest-msg", "网络错误：" + e, true);
+  } finally {
+    $("btn-ingest").disabled = false;
+    $("ingest-file").value = "";
+    loadTree(); graphDirty = true;
+  }
+}
+
+/* ============ 模型设置 ============ */
+async function loadSettings() {
+  const resp = await fetch("/api/llm/config");
+  if (!resp.ok) return;
+  const body = await resp.json().catch(() => null);
+  if (!body) return;
+  $("llm-provider").value = body.provider || "openai_compat";
+  $("llm-base-url").value = body.base_url || "";
+  $("llm-model").value = body.model || "";
+  $("llm-api-key").placeholder = body.api_key_masked
+    ? "当前 key：" + body.api_key_masked + "（重新输入以修改）"
+    : "api_key";
+}
+
+function presetOpenRouter() {
+  $("llm-provider").value = "openai_compat";
+  $("llm-base-url").value = "https://openrouter.ai/api/v1";
+}
+
+async function saveSettings() {
+  const payload = {
+    provider: $("llm-provider").value,
+    base_url: $("llm-base-url").value.trim(),
+    api_key: $("llm-api-key").value.trim(),
+    model: $("llm-model").value.trim()
+  };
+  if (!payload.base_url || !payload.api_key || !payload.model) {
+    return showMsg("llm-msg", "base_url / api_key / model 均不能为空", true);
+  }
+  const resp = await fetch("/api/llm/config", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload)
+  });
+  const body = await resp.json().catch(() => null);
+  if (resp.ok) {
+    showMsg("llm-msg", "已生效（聊天会话将用新模型重建）", false);
+    $("llm-api-key").value = "";
+    loadSettings();
+  } else {
+    showMsg("llm-msg", friendly(resp.status, body), true);
+  }
+}
+
 /* ============ 标签页 ============ */
 let graphDirty = true;
 function switchTab(tab) {
@@ -349,7 +575,6 @@ function switchTab(tab) {
   $("tab-graph").classList.toggle("active", tab === "graph");
   $("tree-view").classList.toggle("hidden", tab !== "tree");
   $("graph-wrap").classList.toggle("hidden", tab !== "graph");
-  $("pane-left").classList.toggle("wide", tab === "graph");
   if (tab === "graph") loadGraph();
 }
 
@@ -432,14 +657,22 @@ function renderMd(src) {
   return html;
 }
 
+/* ============ 页面预览（弹层） ============ */
 async function openPage(path) {
   const resp = await fetch("/api/wiki/page?path=" + encodeURIComponent(path));
   const body = await resp.json().catch(() => null);
-  if (!resp.ok) { $("page-view").textContent = friendly(resp.status, body); return; }
-  $("page-view").innerHTML = renderMd(body.content || "");
-  $("page-view").querySelectorAll("a.wl").forEach(a => {
-    a.onclick = e => { e.preventDefault(); openByStem(a.dataset.target); };
-  });
+  $("preview").classList.remove("hidden");
+  $("preview-path").textContent = path;
+  if (!resp.ok) {
+    $("preview-content").textContent = friendly(resp.status, body);
+    return;
+  }
+  $("preview-content").innerHTML = renderMd(body.content || "");
+  bindWikilinks($("preview-content"));
+}
+
+function closePreview() {
+  $("preview").classList.add("hidden");
 }
 
 async function openByStem(stem) {
@@ -457,10 +690,6 @@ const TYPE_COLORS = {
   "paper": "#3B82F6", "experiment": "#0E9C8E", "source-record": "#9AA0AA",
   "page": "#6B7280"
 };
-const LEGEND = [
-  ["index", "索引"], ["concept", "概念"], ["algorithm", "算法"],
-  ["paper", "论文"], ["experiment", "实验"], ["source-record", "原始记录"], ["page", "页面"]
-];
 const G = {
   nodes: [], edges: [], raw: null,
   k: 1, tx: 0, ty: 0, hover: null, drag: null, pan: null,
@@ -474,7 +703,7 @@ async function loadGraph() {
   G.raw = await resp.json();
   graphDirty = false;
   const canvas = $("graph-canvas");
-  const w = $("pane-left").clientWidth - 24, h = 560;
+  const w = $("sidebar").clientWidth - 50, h = 340;
   canvas.width = w; canvas.height = h;
   canvas.style.width = w + "px"; canvas.style.height = h + "px";
   const deg = {};
@@ -485,7 +714,7 @@ async function loadGraph() {
   G.nodes = G.raw.nodes.map((n, i) => ({
     id: n.id, label: n.label, type: n.type,
     r: 6 + (deg[n.id] || 0) * 2,
-    x: Math.cos(i * 2.399) * (60 + i * 12), y: Math.sin(i * 2.399) * (60 + i * 12),
+    x: Math.cos(i * 2.399) * (50 + i * 10), y: Math.sin(i * 2.399) * (50 + i * 10),
     vx: 0, vy: 0, fixed: false
   }));
   const idx = {};
@@ -496,8 +725,6 @@ async function loadGraph() {
   G.k = 1; G.tx = w / 2; G.ty = h / 2; G.frame = 0;
   cancelAnimationFrame(G.raf);
   tick();
-  $("graph-legend").innerHTML = LEGEND.map(([t, name]) =>
-    `<div><span class="sw" style="background:${TYPE_COLORS[t]}"></span>${name}</div>`).join("");
 }
 
 function tick() {
