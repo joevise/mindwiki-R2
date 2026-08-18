@@ -39,7 +39,48 @@ async fn main() -> Result<()> {
             let vault = mw_store::Vault::open(std::env::current_dir()?)?;
             let gateway = mw_crypto::KeyGateway::new()?;
             vault.init(&gateway, &password)?;
+            let token = vault.ensure_admin_token()?;
             println!("vault initialized: {}", vault.container_path().display());
+            println!("admin token (save it, required for remote close): {token}");
+            println!("token file: {} (chmod 600)", vault.admin_token_path().display());
+        }
+        Some("serve") => {
+            let vault = mw_store::Vault::open(std::env::current_dir()?)?;
+            if !vault.exists() {
+                return Err(anyhow!("no vault in current directory (run: mindwiki init --password ***)"));
+            }
+            let state = mw_server::serve::load_state(&vault)?;
+            let local = tokio::net::TcpListener::bind("127.0.0.1:7900").await?;
+            println!("serving gateway API on http://127.0.0.1:7900");
+            match flag_value(&args, "--admin-bind") {
+                Some(bind) => {
+                    let admin = tokio::net::TcpListener::bind(&bind).await?;
+                    println!("remote admin enabled on http://{bind} (protect with admin token)");
+                    tokio::try_join!(
+                        mw_server::serve::serve(local, state.clone()),
+                        mw_server::serve::serve(admin, state)
+                    )?;
+                }
+                None => {
+                    mw_server::serve::serve(local, state).await?;
+                }
+            }
+        }
+        Some("lock") => {
+            let vault = mw_store::Vault::open(std::env::current_dir()?)?;
+            let path = vault.admin_token_path();
+            let token = std::fs::read_to_string(&path)
+                .map_err(|_| anyhow!("no admin.token — run: mindwiki init --password ***"))?;
+            mw_server::serve::remote_close("127.0.0.1:7900", token.trim()).await?;
+            println!("gateway locked: sessions terminated, keys zeroized");
+        }
+        Some("remote-close") => {
+            let host = flag_value(&args, "--host")
+                .ok_or_else(|| anyhow!("usage: mindwiki remote-close --host x.x.x.x:7901 --token ***"))?;
+            let token = flag_value(&args, "--token")
+                .ok_or_else(|| anyhow!("usage: mindwiki remote-close --host x.x.x.x:7901 --token ***"))?;
+            mw_server::serve::remote_close(&host, &token).await?;
+            println!("remote gateway at {host} locked");
         }
         Some("status") => {
             let vault = mw_store::Vault::open(std::env::current_dir()?)?;
@@ -65,11 +106,11 @@ async fn main() -> Result<()> {
         }
         Some(other) => {
             eprintln!("unknown command: {other}");
-            eprintln!("usage: mindwiki <version|skills|init|status|ask>");
+            eprintln!("usage: mindwiki <version|skills|init|status|ask|serve|lock|remote-close>");
         }
         None => {
             println!("mindwiki {} — 企业级安全 AI 知识库", env!("CARGO_PKG_VERSION"));
-            println!("commands: version | skills | init | status | ask");
+            println!("commands: version | skills | init | status | ask | serve | lock | remote-close");
         }
     }
     Ok(())

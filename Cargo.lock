@@ -1921,11 +1921,15 @@ name = "mw-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "mw-agent",
  "mw-crypto",
  "mw-store",
  "mw-wiki",
+ "reqwest",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1939,6 +1943,7 @@ dependencies = [
  "flate2",
  "git2",
  "mw-crypto",
+ "rand 0.8.7",
  "serde",
  "serde_json",
  "tar",

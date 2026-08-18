@@ -14,7 +14,13 @@ mw-crypto = { path = "../mw-crypto" }
 mw-wiki = { path = "../mw-wiki" }
 mw-agent = { path = "../mw-agent" }
 anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+axum.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

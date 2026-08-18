@@ -6,5 +6,5 @@
 pub mod gateway;
 pub mod secret;
 
-pub use gateway::{GatewayState, KeyGateway};
+pub use gateway::{GatewayState, KeyGateway, SessionHandle, SessionRegistry};
 pub use secret::SecretStore;

@@ -3,7 +3,11 @@
 
 use anyhow::{anyhow, bail, Result};
 use besure::crypto::VaultCrypto;
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GatewayState {
@@ -11,10 +15,26 @@ pub enum GatewayState {
     Closed,
 }
 
+/// 会话注册表：层间解耦（mw-store 依赖此 trait，不依赖 KeyGateway 具体类型）
+pub trait SessionRegistry: Send + Sync {
+    fn register(&self, id: &str, work_dir: &Path, flag: Arc<AtomicBool>);
+    fn unregister(&self, id: &str);
+}
+
+/// 活跃会话句柄：强制终止旗标由 DecryptedSession 持有
+pub struct SessionHandle {
+    pub work_dir: PathBuf,
+    pub terminate: Arc<AtomicBool>,
+}
+
 pub struct KeyGateway {
     crypto: Mutex<Option<VaultCrypto>>,
     salt: Vec<u8>,
     verify_token: Mutex<Option<Vec<u8>>>,
+    /// 活跃会话注册表：session_id → 强制终止句柄
+    sessions: Mutex<HashMap<String, SessionHandle>>,
+    /// 审计：何时关闭
+    pub closed_at: Mutex<Option<Instant>>,
 }
 
 impl KeyGateway {
@@ -25,6 +45,8 @@ impl KeyGateway {
             salt: crypto.salt().to_vec(),
             crypto: Mutex::new(Some(crypto)),
             verify_token: Mutex::new(None),
+            sessions: Mutex::new(HashMap::new()),
+            closed_at: Mutex::new(None),
         })
     }
 
@@ -34,6 +56,8 @@ impl KeyGateway {
             crypto: Mutex::new(Some(VaultCrypto::from_salt(salt.clone()))),
             salt,
             verify_token: Mutex::new(Some(verify_token)),
+            sessions: Mutex::new(HashMap::new()),
+            closed_at: Mutex::new(None),
         }
     }
 
@@ -89,13 +113,27 @@ impl KeyGateway {
         Ok(t)
     }
 
-    /// 一键关闭：密钥 zeroize（VaultCrypto::lock），此后一切密文为噪声
+    /// 一键关闭：密钥 zeroize + 终止全部活跃会话 + 记录审计时间。
+    /// 被终止会话的 Drop 不做 seal、直接销毁，此后一切密文为噪声。
     pub fn close(&self) {
-        let mut slot = self.crypto.lock().unwrap();
-        if let Some(c) = slot.as_mut() {
-            c.lock();
+        {
+            let mut slot = self.crypto.lock().unwrap();
+            if let Some(c) = slot.as_mut() {
+                c.lock();
+            }
+            *slot = None;
         }
-        *slot = None;
+        let mut sessions = self.sessions.lock().unwrap();
+        for handle in sessions.values() {
+            handle.terminate.store(true, Ordering::SeqCst);
+        }
+        sessions.clear();
+        *self.closed_at.lock().unwrap() = Some(Instant::now());
+    }
+
+    /// 当前活跃会话数（监控 / state 端点用）
+    pub fn active_sessions(&self) -> usize {
+        self.sessions.lock().unwrap().len()
     }
 
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
@@ -122,6 +160,22 @@ impl KeyGateway {
             bail!("key gateway closed — all ciphertext is inert");
         }
         Ok(())
+    }
+}
+
+impl SessionRegistry for KeyGateway {
+    fn register(&self, id: &str, work_dir: &Path, flag: Arc<AtomicBool>) {
+        self.sessions.lock().unwrap().insert(
+            id.to_string(),
+            SessionHandle {
+                work_dir: work_dir.to_path_buf(),
+                terminate: flag,
+            },
+        );
+    }
+
+    fn unregister(&self, id: &str) {
+        self.sessions.lock().unwrap().remove(id);
     }
 }
 

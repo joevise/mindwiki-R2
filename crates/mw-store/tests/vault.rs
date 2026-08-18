@@ -92,3 +92,85 @@ fn disk_is_ciphertext() {
     assert!(!data.windows(9).any(|w| w == b"TOPSECRET"));
     assert!(!data.windows(9).any(|w| w == b"secret.md"));
 }
+
+#[test]
+fn close_terminates_sessions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = Vault::open(tmp.path()).unwrap();
+    let gw = KeyGateway::new().unwrap();
+    vault.init(&gw, "pw-A").unwrap();
+
+    let session = vault.open_session(&gw).unwrap();
+    assert!(!session.is_terminated());
+    assert_eq!(gw.active_sessions(), 1);
+    assert!(gw.closed_at.lock().unwrap().is_none());
+
+    gw.close();
+
+    // 终止旗标置位；注册表清空；审计时间已记录
+    assert!(session.is_terminated());
+    assert_eq!(gw.active_sessions(), 0);
+    assert!(gw.closed_at.lock().unwrap().is_some());
+
+    // 被终止的会话 seal 被拒绝；容器保持旧密文
+    let before = std::fs::read(vault.container_path()).unwrap();
+    assert!(vault.seal_session(&gw, &session).is_err());
+    let after = std::fs::read(vault.container_path()).unwrap();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn terminated_session_not_sealed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = Vault::open(tmp.path()).unwrap();
+    let gw = KeyGateway::new().unwrap();
+    vault.init(&gw, "pw-A").unwrap();
+
+    // 先封印一版 v1
+    {
+        let session = vault.open_session(&gw).unwrap();
+        std::fs::write(session.work_dir().join("secret.md"), "v1").unwrap();
+        session.git_commit("v1").unwrap();
+        vault.seal_session(&gw, &session).unwrap();
+    }
+
+    // 第二个会话写入 v2 但未 seal，就被 close 终止
+    let work_dir;
+    {
+        let session = vault.open_session(&gw).unwrap();
+        work_dir = session.work_dir().to_path_buf();
+        std::fs::write(session.work_dir().join("secret.md"), "v2-leaked").unwrap();
+        gw.close();
+        assert!(session.is_terminated());
+    }
+    // drop 后临时目录已销毁，明文不落盘
+    assert!(!work_dir.exists());
+
+    // 重开验证：容器仍是 v1，v2 从未写入
+    let gw2 = reopen_gateway(&vault, "pw-A");
+    let session = vault.open_session(&gw2).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(session.work_dir().join("secret.md")).unwrap(),
+        "v1"
+    );
+    gw2.close();
+}
+
+#[test]
+fn admin_token_file_created_on_init() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = Vault::open(tmp.path()).unwrap();
+    let gw = KeyGateway::new().unwrap();
+    vault.init(&gw, "pw-A").unwrap();
+
+    let path = vault.admin_token_path();
+    assert!(path.exists());
+    let token = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(token.trim().len(), 64);
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+
+    // 幂等：再次取返回同一 token
+    assert_eq!(vault.ensure_admin_token().unwrap(), token.trim());
+    gw.close();
+}
