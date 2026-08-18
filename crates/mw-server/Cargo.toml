@@ -1,0 +1,20 @@
+[package]
+name = "mw-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mindwiki"
+path = "src/main.rs"
+
+[dependencies]
+mw-store = { path = "../mw-store" }
+mw-crypto = { path = "../mw-crypto" }
+mw-wiki = { path = "../mw-wiki" }
+mw-agent = { path = "../mw-agent" }
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

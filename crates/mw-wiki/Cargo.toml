@@ -1,0 +1,16 @@
+[package]
+name = "mw-wiki"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mw-crypto = { path = "../mw-crypto" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"

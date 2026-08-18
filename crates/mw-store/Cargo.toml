@@ -1,0 +1,17 @@
+[package]
+name = "mw-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mw-crypto = { path = "../mw-crypto" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+git2.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
