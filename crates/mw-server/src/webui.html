@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mind Wiki</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #fff; color: #111; min-height: 100vh;
+  }
+  .accent { color: #d92027; }
+  header {
+    border-bottom: 3px solid #d92027; padding: 20px 32px;
+    display: flex; align-items: baseline; gap: 16px;
+  }
+  header h1 { font-size: 24px; letter-spacing: 1px; }
+  header .tag { font-size: 12px; color: #666; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 32px 64px; }
+  .statusbar {
+    display: flex; align-items: center; gap: 10px;
+    border: 1px solid #ddd; border-left: 6px solid #d92027;
+    padding: 12px 16px; margin-bottom: 24px; font-size: 14px;
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #999; }
+  .dot.open { background: #d92027; }
+  .card {
+    border: 1px solid #ddd; padding: 20px; margin-bottom: 20px;
+  }
+  .card h2 { font-size: 15px; margin-bottom: 12px; }
+  .card h2::before { content: "■ "; color: #d92027; font-size: 10px; vertical-align: 2px; }
+  input[type=password], input[type=text], input[type=file] {
+    width: 100%; padding: 10px; border: 1px solid #bbb; font-size: 14px;
+    margin-bottom: 10px; background: #fff; color: #111;
+  }
+  input:focus { outline: 2px solid #d92027; outline-offset: -1px; }
+  button {
+    background: #111; color: #fff; border: none; padding: 10px 22px;
+    font-size: 14px; cursor: pointer;
+  }
+  button:hover { background: #d92027; }
+  button:disabled { background: #999; cursor: not-allowed; }
+  button.lock {
+    background: #d92027; font-weight: bold; width: 100%;
+    padding: 14px; font-size: 16px; letter-spacing: 2px;
+  }
+  button.lock:hover { background: #a8151b; }
+  .answer {
+    border: 1px solid #ddd; border-top: 3px solid #d92027;
+    padding: 16px; margin-top: 12px; white-space: pre-wrap;
+    font-size: 14px; line-height: 1.7; min-height: 60px; background: #fafafa;
+  }
+  .msg { font-size: 13px; margin-top: 8px; min-height: 18px; }
+  .msg.error { color: #d92027; }
+  .msg.ok { color: #111; }
+  .hidden { display: none; }
+  .spinner {
+    display: inline-block; width: 16px; height: 16px;
+    border: 2px solid #ddd; border-top-color: #d92027; border-radius: 50%;
+    animation: spin .8s linear infinite; vertical-align: -3px; margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #overlay {
+    position: fixed; inset: 0; background: rgba(255,255,255,.85);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; z-index: 10;
+  }
+  .files { font-size: 12px; color: #666; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Mind <span class="accent">Wiki</span></h1>
+  <span class="tag">企业级安全 AI 知识库</span>
+</header>
+<main>
+  <div class="statusbar">
+    <span class="dot" id="dot"></span>
+    <span id="status-text">加载中…</span>
+  </div>
+
+  <div class="card hidden" id="card-init">
+    <h2>创建知识库</h2>
+    <input type="password" id="init-password" placeholder="设置主密码">
+    <button onclick="doInit()">创建知识库</button>
+    <div class="msg" id="init-msg"></div>
+  </div>
+
+  <div class="card hidden" id="card-unlock">
+    <h2>解锁知识库</h2>
+    <input type="password" id="open-password" placeholder="主密码">
+    <button onclick="doOpen()">解锁</button>
+    <div class="msg" id="open-msg"></div>
+  </div>
+
+  <div id="section-open" class="hidden">
+    <div class="card">
+      <h2>上传 Markdown 入库</h2>
+      <input type="file" id="ingest-file" accept=".md">
+      <button onclick="doIngest()">入库</button>
+      <div class="msg" id="ingest-msg"></div>
+      <div class="files" id="ingest-files"></div>
+    </div>
+
+    <div class="card">
+      <h2>查询</h2>
+      <input type="text" id="query-input" placeholder="向知识库提问…"
+             onkeydown="if(event.key==='Enter')doQuery()">
+      <button onclick="doQuery()">提问</button>
+      <div class="answer hidden" id="answer"></div>
+      <div class="msg" id="query-msg"></div>
+    </div>
+
+    <div class="card">
+      <button class="lock" onclick="doLock()">🔒 一键锁定</button>
+      <div class="msg" id="lock-msg"></div>
+    </div>
+  </div>
+</main>
+
+<div id="overlay" class="hidden">
+  <div><span class="spinner"></span><span id="overlay-text">Agent 工作中…</span></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+function showMsg(id, text, isError) {
+  const el = $(id);
+  el.textContent = text || "";
+  el.className = "msg " + (isError ? "error" : "ok");
+}
+
+function friendly(status, body) {
+  if (status === 423) return "知识库已锁定，请先解锁";
+  if (status === 503) return (body && body.error) || "未配置 LLM（MW_LLM_API_KEY）";
+  return (body && body.error) || ("请求失败：HTTP " + status);
+}
+
+function busy(on, text) {
+  $("overlay").classList.toggle("hidden", !on);
+  if (text) $("overlay-text").textContent = text;
+}
+
+async function refresh() {
+  try {
+    const st = await (await fetch("/api/vault/status")).json();
+    const gw = await (await fetch("/api/gateway/state")).json();
+    const open = st.exists && gw.state === "open";
+    $("dot").className = "dot" + (open ? " open" : "");
+    $("status-text").textContent = !st.exists
+      ? "未初始化 — 请创建知识库"
+      : open ? "已解锁 🔓（明文仅在内存临时区）" : "密封 🔒（磁盘上为密文）";
+    $("card-init").classList.toggle("hidden", st.exists);
+    $("card-unlock").classList.toggle("hidden", !st.exists || open);
+    $("section-open").classList.toggle("hidden", !open);
+  } catch (e) {
+    $("status-text").textContent = "服务连接失败";
+  }
+}
+
+async function doInit() {
+  const password = $("init-password").value;
+  if (!password) return showMsg("init-msg", "请输入主密码", true);
+  const resp = await fetch("/api/vault/init", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({password})
+  });
+  const body = await resp.json().catch(() => null);
+  if (resp.ok) {
+    showMsg("init-msg", "创建成功，请解锁", false);
+    refresh();
+  } else {
+    showMsg("init-msg", friendly(resp.status, body), true);
+  }
+}
+
+async function doOpen() {
+  const password = $("open-password").value;
+  const resp = await fetch("/api/gateway/open", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({password})
+  });
+  const body = await resp.json().catch(() => null);
+  if (resp.ok) {
+    $("open-password").value = "";
+    showMsg("open-msg", "", false);
+    refresh();
+  } else {
+    showMsg("open-msg", resp.status === 403 ? "密码错误" : friendly(resp.status, body), true);
+  }
+}
+
+async function doIngest() {
+  const file = $("ingest-file").files[0];
+  if (!file) return showMsg("ingest-msg", "请选择 .md 文件", true);
+  const fd = new FormData();
+  fd.append("file", file);
+  busy(true, "Agent 入库中…");
+  try {
+    const resp = await fetch("/api/ingest", {method: "POST", body: fd});
+    const body = await resp.json().catch(() => null);
+    if (resp.ok) {
+      showMsg("ingest-msg", "入库完成", false);
+      $("ingest-files").textContent =
+        body.files && body.files.length ? "变更文件：" + body.files.join(", ") : "";
+      $("ingest-file").value = "";
+    } else {
+      showMsg("ingest-msg", friendly(resp.status, body), true);
+    }
+  } finally {
+    busy(false);
+    refresh();
+  }
+}
+
+async function doQuery() {
+  const question = $("query-input").value.trim();
+  if (!question) return showMsg("query-msg", "请输入问题", true);
+  busy(true, "Agent 查询中…");
+  try {
+    const resp = await fetch("/api/query", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({question})
+    });
+    const body = await resp.json().catch(() => null);
+    if (resp.ok) {
+      $("answer").textContent = body.answer || "";
+      $("answer").classList.remove("hidden");
+      showMsg("query-msg", body.sealed ? "（答案已沉淀入库）" : "", false);
+    } else {
+      showMsg("query-msg", friendly(resp.status, body), true);
+    }
+  } finally {
+    busy(false);
+    refresh();
+  }
+}
+
+async function doLock() {
+  let token = sessionStorage.getItem("mw_admin_token");
+  if (!token) {
+    token = prompt("输入 admin token（见 vault 目录下 admin.token 文件）");
+    if (!token) return;
+  }
+  const resp = await fetch("/api/gateway/close", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({admin_token: token})
+  });
+  if (resp.ok) {
+    sessionStorage.setItem("mw_admin_token", token);
+    showMsg("lock-msg", "已锁定：密钥已销毁，会话已终止", false);
+    refresh();
+  } else {
+    sessionStorage.removeItem("mw_admin_token");
+    showMsg("lock-msg", "admin token 无效", true);
+  }
+}
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

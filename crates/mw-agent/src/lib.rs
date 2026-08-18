@@ -117,6 +117,20 @@ mod tests {
     }
 
     #[test]
+    fn build_config_uses_self_work_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = tmp.path().join("skills");
+        let work = tmp.path().join("session-work");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        std::env::set_var("MW_LLM_API_KEY", "sk-test");
+        let agent = WikiAgent::new(&skills, &work);
+        let cfg = agent.build_config().unwrap();
+        assert_eq!(cfg.agent.work_dir, work.to_string_lossy());
+        std::env::remove_var("MW_LLM_API_KEY");
+    }
+
+    #[test]
     fn build_config_requires_api_key() {
         let tmp = tempfile::tempdir().unwrap();
         std::env::remove_var("MW_LLM_API_KEY");

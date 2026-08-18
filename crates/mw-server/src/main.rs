@@ -45,13 +45,22 @@ async fn main() -> Result<()> {
             println!("token file: {} (chmod 600)", vault.admin_token_path().display());
         }
         Some("serve") => {
+            let port = flag_value(&args, "--port").unwrap_or_else(|| "7900".into());
+            let skills = flag_value(&args, "--skills")
+                .map(PathBuf::from)
+                .unwrap_or_else(skills_root);
             let vault = mw_store::Vault::open(std::env::current_dir()?)?;
-            if !vault.exists() {
-                return Err(anyhow!("no vault in current directory (run: mindwiki init --password ***)"));
+            let no_vault = !vault.exists();
+            let state = mw_server::serve::load_state(vault, skills)?;
+            let bind = format!("127.0.0.1:{port}");
+            let local = tokio::net::TcpListener::bind(&bind).await?;
+            println!("Web 界面 http://{bind}");
+            if no_vault {
+                println!("(当前目录无 vault — 可在网页中创建知识库)");
             }
-            let state = mw_server::serve::load_state(&vault)?;
-            let local = tokio::net::TcpListener::bind("127.0.0.1:7900").await?;
-            println!("serving gateway API on http://127.0.0.1:7900");
+            if std::env::var("MW_LLM_API_KEY").is_err() {
+                println!("(未配置 MW_LLM_API_KEY — 入库/查询将返回 503)");
+            }
             match flag_value(&args, "--admin-bind") {
                 Some(bind) => {
                     let admin = tokio::net::TcpListener::bind(&bind).await?;
