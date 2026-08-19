@@ -99,6 +99,37 @@
   .md pre code { background: none; padding: 0; }
   .md a.wl { color: #3B82F6; text-decoration: none; border-bottom: 1px dashed #3B82F6; cursor: pointer; }
 
+  /* 图谱全屏 */
+  #graphfs {
+    position: fixed; inset: 0; z-index: 60; background: #fff;
+    display: none; flex-direction: column;
+  }
+  #graphfs:not(.hidden) { display: flex; }
+  #graphfs canvas { flex: 1; min-height: 0; cursor: grab; }
+  #graphfs-bar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; border-bottom: 1px solid #eee; flex: 0 0 auto;
+  }
+  #graphfs-bar .t { font-weight: 600; font-size: 15px; }
+  #graphfs-bar .hint { color: #999; font-size: 12px; }
+  #graphfs-exit {
+    margin-left: auto; border: 1px solid #ddd; background: #fff;
+    padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  #graphfs-exit:hover { border-color: #d92027; color: #d92027; }
+  #graphfs-legend {
+    position: absolute; left: 14px; bottom: 12px; z-index: 2;
+    font-size: 12px; color: #666; background: rgba(255,255,255,.9);
+    padding: 6px 10px; border-radius: 6px; border: 1px solid #eee;
+    line-height: 1.9; max-height: 46vh; overflow-y: auto;
+  }
+  #graphfs-legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+  .fsbtn {
+    border: 1px solid #ddd; background: #fff; padding: 5px 12px;
+    border-radius: 6px; cursor: pointer; font-size: 12px; margin-left: 8px;
+  }
+  .fsbtn:hover { border-color: #d92027; color: #d92027; }
+
   /* 入库进度 */
   #ingest-progress {
     font-size: 12px; color: #999; max-height: 140px; overflow-y: auto;
@@ -250,6 +281,7 @@
           <div class="tabs">
             <button id="tab-tree" class="active" onclick="switchTab('tree')">文件树</button>
             <button id="tab-graph" onclick="switchTab('graph')">图谱</button>
+            <button id="btn-graphfs" class="fsbtn" onclick="enterGraphFS()">⛶ 全屏</button>
           </div>
           <div class="browser">
             <div id="tree-view" class="tree"></div>
@@ -319,6 +351,16 @@
   <div class="del-spin-box"><span class="spinner"></span>智能删除中：Agent 正在扫描全库并清理引用…</div>
 </div>
 
+<div id="graphfs" class="hidden">
+  <div id="graphfs-bar">
+    <span class="t">知识图谱</span>
+    <span class="hint">滚轮缩放 · 拖拽平移 · 点节点打开页面 · Esc 退出</span>
+    <button id="graphfs-exit" onclick="exitGraphFS()">✕ 退出全屏</button>
+  </div>
+  <canvas id="graphfs-canvas"></canvas>
+  <div id="graphfs-legend"></div>
+</div>
+
 <div id="toast" class="hidden"></div>
 
 <script>
@@ -361,6 +403,7 @@ async function refresh() {
 
 function onUnlocked() { loadTree(); graphDirty = true; loadSettings(); }
 function onLocked() {
+  if (G.fs) exitGraphFS();
   $("tree-view").innerHTML = "";
   $("chat-list").innerHTML = "";
   $("ingest-progress").innerHTML = "";
@@ -885,7 +928,7 @@ const TYPE_COLORS = {
 const G = {
   nodes: [], edges: [], raw: null,
   k: 1, tx: 0, ty: 0, hover: null, drag: null, pan: null,
-  frame: 0, raf: 0, moved: false
+  frame: 0, raf: 0, moved: false, fs: false
 };
 
 async function loadGraph() {
@@ -894,10 +937,15 @@ async function loadGraph() {
   if (!resp.ok) return;
   G.raw = await resp.json();
   graphDirty = false;
-  const canvas = $("graph-canvas");
-  const w = $("sidebar").clientWidth - 50, h = 340;
-  canvas.width = w; canvas.height = h;
-  canvas.style.width = w + "px"; canvas.style.height = h + "px";
+  const canvas = activeCanvas();
+  let w = 0, h = 0;
+  if (G.fs) {
+    w = canvas.width; h = canvas.height;
+  } else {
+    w = $("sidebar").clientWidth - 50; h = 340;
+    canvas.style.width = w + "px"; canvas.style.height = h + "px";
+    canvas.width = w; canvas.height = h;
+  }
   const deg = {};
   for (const e of G.raw.edges) {
     deg[e.from] = (deg[e.from] || 0) + 1;
@@ -951,8 +999,10 @@ function tick() {
   if (++G.frame < 300) G.raf = requestAnimationFrame(tick);
 }
 
+function activeCanvas() { return G.fs ? $("graphfs-canvas") : $("graph-canvas"); }
+
 function drawGraph() {
-  const canvas = $("graph-canvas");
+  const canvas = activeCanvas();
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.setTransform(G.k, 0, 0, G.k, G.tx, G.ty);
@@ -995,7 +1045,7 @@ function drawGraph() {
 }
 
 function graphPos(e) {
-  const rect = $("graph-canvas").getBoundingClientRect();
+  const rect = activeCanvas().getBoundingClientRect();
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
   return { mx, my, wx: (mx - G.tx) / G.k, wy: (my - G.ty) / G.k };
 }
@@ -1009,7 +1059,7 @@ function nodeAt(wx, wy) {
 }
 
 (function initGraphEvents() {
-  const canvas = $("graph-canvas");
+  const bind = canvas => {
   canvas.addEventListener("mousedown", e => {
     const p = graphPos(e);
     const i = nodeAt(p.wx, p.wy);
@@ -1046,7 +1096,47 @@ function nodeAt(wx, wy) {
     G.ty = p.my - (p.my - G.ty) * (k2 / G.k);
     G.k = k2; drawGraph();
   }, {passive: false});
+  };
+  bind($("graph-canvas"));
+  bind($("graphfs-canvas"));
 })();
+
+/* ============ 图谱全屏 ============ */
+function enterGraphFS() {
+  $("graphfs").classList.remove("hidden");
+  G.fs = true;
+  const c = $("graphfs-canvas");
+  c.width = window.innerWidth; c.height = window.innerHeight - 46;
+  // 重置视野居中
+  G.k = 1; G.tx = c.width / 2; G.ty = c.height / 2; G.frame = 0;
+  cancelAnimationFrame(G.raf);
+  tick();
+  // 图例（全屏版）
+  const lg = $("graphfs-legend");
+  const seen = {};
+  lg.innerHTML = "";
+  for (const n of G.nodes) seen[n.type] = (seen[n.type] || 0) + 1;
+  for (const [t, cnt] of Object.entries(seen).sort((a, b) => b[1] - a[1])) {
+    const row = document.createElement("div");
+    row.innerHTML = `<span class="sw" style="background:${TYPE_COLORS[t] || TYPE_COLORS.page}"></span>${t} · ${cnt}`;
+    lg.appendChild(row);
+  }
+}
+function exitGraphFS() {
+  $("graphfs").classList.add("hidden");
+  G.fs = false;
+  drawGraph();
+}
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && G.fs) exitGraphFS();
+});
+window.addEventListener("resize", () => {
+  if (G.fs) {
+    const c = $("graphfs-canvas");
+    c.width = window.innerWidth; c.height = window.innerHeight - 46;
+    drawGraph();
+  }
+});
 
 refresh();
 setInterval(refresh, 3000);
