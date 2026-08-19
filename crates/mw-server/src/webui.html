@@ -1105,9 +1105,11 @@ function nodeAt(wx, wy) {
 })();
 
 /* ============ 图谱全屏 ============ */
-function enterGraphFS() {
+async function enterGraphFS() {
   $("graphfs").classList.remove("hidden");
   G.fs = true;
+  // 冷启动保护：从未打开过图谱标签时先补加载，避免全屏空画布
+  if (!G.raw) await loadGraph();
   const c = $("graphfs-canvas");
   c.width = window.innerWidth; c.height = window.innerHeight - 46;
   // 重置视野居中
@@ -1128,6 +1130,15 @@ function enterGraphFS() {
 function exitGraphFS() {
   $("graphfs").classList.add("hidden");
   G.fs = false;
+  // 修复：全屏时的视野中心（tx/ty）是按大画布尺寸算的，
+  // 回到小画布必须重新居中，否则内容画在画布外——小图谱一片空白
+  const c = $("graph-canvas");
+  if (!c.width) {
+    const w = $("sidebar").clientWidth - 50, h = 340;
+    c.width = w; c.height = h;
+    c.style.width = w + "px"; c.style.height = h + "px";
+  }
+  G.k = 1; G.tx = c.width / 2; G.ty = c.height / 2;
   drawGraph();
 }
 document.addEventListener("keydown", e => {
