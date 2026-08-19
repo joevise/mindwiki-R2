@@ -1125,11 +1125,14 @@ async fn chat_handler(
             };
             let work = sess_guard.as_ref().unwrap().work_dir().to_path_buf();
             drop(sess_guard);
+            // 人格层：vault 根目录 mindrule.txt 存在则注入聊天 system_prompt
+            let mindrule = std::fs::read_to_string(s.vault.root.join("mindrule.txt")).ok();
             let agent = mw_agent::WikiAgent::with_llm(
                 &s.skills_root,
                 &work,
                 s.llm.read().unwrap().clone(),
-            );
+            )
+            .with_mindrule(mindrule);
             let created = agent
                 .build_chat_config()
                 .map_err(|e| e.to_string())

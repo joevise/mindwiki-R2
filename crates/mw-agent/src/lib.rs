@@ -82,6 +82,8 @@ pub struct WikiAgent {
     pub skills_root: PathBuf,
     pub work_dir: PathBuf,
     pub llm: LlmConfig,
+    /// 人格层（mindrule.txt）：注入聊天 system_prompt 头部，让 Agent 以指定思维方式说话
+    pub mindrule: Option<String>,
 }
 
 impl WikiAgent {
@@ -91,6 +93,7 @@ impl WikiAgent {
             skills_root: skills_root.into(),
             work_dir: work_dir.into(),
             llm: LlmConfig::from_env(),
+            mindrule: None,
         }
     }
 
@@ -104,7 +107,14 @@ impl WikiAgent {
             skills_root: skills_root.into(),
             work_dir: work_dir.into(),
             llm,
+            mindrule: None,
         }
+    }
+
+    /// 设置人格层（链式）
+    pub fn with_mindrule(mut self, mindrule: Option<String>) -> Self {
+        self.mindrule = mindrule;
+        self
     }
 
     /// 构造带 skills 的 Agent 系统提示词
@@ -159,13 +169,21 @@ impl WikiAgent {
         Ok(config)
     }
 
-    /// 多轮聊天配置：wiki skills 注入同上，追加多轮对话指引
+    /// 多轮聊天配置：人格层优先注入 + wiki skills + 多轮对话指引
     pub fn build_chat_config(&self) -> Result<Config> {
         let mut config = self.build_config()?;
-        config
-            .agent
-            .system_prompt
-            .push_str("\n这是多轮对话，用 wiki-query 技能查知识库回答。\n");
+        if let Some(rule) = self.mindrule.as_ref() {
+            // 人格层放最前面：LLM 对 system_prompt 开头的指令锚定最强
+            config.agent.system_prompt = format!(
+                "{rule}\n\n===== 以下是你可调用的知识库操作技能（检索资料时用，但表达上必须内化为个人经验，绝不提及工具或知识库）=====\n{}\n\n这是多轮对话，用 wiki-query 技能查知识库回答。",
+                config.agent.system_prompt
+            );
+        } else {
+            config
+                .agent
+                .system_prompt
+                .push_str("\n这是多轮对话，用 wiki-query 技能查知识库回答。\n");
+        }
         Ok(config)
     }
 
