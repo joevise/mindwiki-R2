@@ -952,8 +952,9 @@ async function loadGraph() {
     deg[e.to] = (deg[e.to] || 0) + 1;
   }
   G.nodes = G.raw.nodes.map((n, i) => ({
-    id: n.id, label: n.label, type: n.type,
-    r: 6 + (deg[n.id] || 0) * 2,
+    id: n.id, label: n.label, type: n.type, deg: deg[n.id] || 0,
+    // 对数缩放 + 上限：度数差异可见但枢纽不会吞屏
+    r: 5 + Math.min(15, Math.sqrt(deg[n.id] || 0) * 2.2),
     x: Math.cos(i * 2.399) * (50 + i * 10), y: Math.sin(i * 2.399) * (50 + i * 10),
     vx: 0, vy: 0, fixed: false
   }));
@@ -1038,7 +1039,9 @@ function drawGraph() {
     ctx.fillStyle = "#1B1D22";
     ctx.font = `${11 / G.k}px sans-serif`;
     ctx.textAlign = "center";
-    ctx.fillText(n.label, n.x, n.y + n.r + 12 / G.k);
+    // LOD：高连接节点始终显示标签；小节点仅在放大后显示，避免满屏字
+    if (n.deg >= 8 || G.k >= 1.5 || i === G.hover)
+      ctx.fillText(n.label, n.x, n.y + n.r + 12 / G.k);
     ctx.globalAlpha = 1;
   });
   ctx.setTransform(1, 0, 0, 1, 0, 0);
